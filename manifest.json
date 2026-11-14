@@ -1,0 +1,21 @@
+{
+  "id": "rwp-developers",
+  "name": "RWP Developers",
+  "version": "1.0.0",
+  "author": "React-WP",
+  "description": "Everything a plugin developer needs on their own site: test a plugin ZIP before installing it, publish plugins (ZIP or GitHub release) to your own Supabase storage, and sell them with your own Stripe or NOWPayments account and your own signed licence keys. Nothing here goes through react-wp.com.",
+  "entry": "./index.tsx",
+  "database": {
+    "schema": "./schema.sql",
+    "uninstall": "./uninstall.sql",
+    "tables": ["dev_products", "dev_versions", "dev_orders", "dev_licenses", "dev_settings", "dev_secrets"],
+    "functions": [
+      "dev_store_catalog", "dev_place_order", "dev_complete_order", "dev_verify_license", "dev_my_licenses",
+      "dev_record_version"
+    ],
+    "retains": [
+      "Plugin packages uploaded to Supabase Storage (bucket rwp-developer-packages) are not deleted; remove the bucket in the Supabase dashboard if you want the files gone.",
+      "Orders, licences and sealed payment credentials belong to the developer shop and are dropped with it."
+    ]
+  }
+}
