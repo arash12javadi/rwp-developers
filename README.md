@@ -55,6 +55,9 @@ public GitHub repository and publish ordinary GitHub releases (see the marketpla
    something to read".
 3. Set the **price** (0 = free), optionally how many **days a licence lasts** (empty = lifetime), and set the plugin **On sale**.
    A plugin with no published version cannot be put on sale.
+   **Submit to marketplace** (on a plugin linked to a GitHub repository) opens react-wp.com's `/plugins/submit` page in a
+   new tab with the repository filled in. Nothing is sent from your site; you confirm on that page (react-wp.com account
+   needed). The marketplace scans the release and passes it to the marketplace owner; it goes live only after approval.
 4. Your shop is at **`/store`**, or put `[rwp_developer_store title="Plugins"]` on any page.
 
 A buyer signs in, pays (or claims a free plugin), and finds their **licence key** and a **Download** button under *My

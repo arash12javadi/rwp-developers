@@ -6,7 +6,9 @@ import type { DevProduct, DevVersion, ImportResult, UploadResult, VetReportShape
 import styles from '../developers.module.css';
 
 const CATEGORIES = ['utility', 'commerce', 'marketing', 'seo', 'media', 'developer', 'integration'];
-const SIX_HOURS = 6 * 60 * 60 * 1000;
+/** The marketplace's public submit page; the only address this plugin ever sends the developer to. */
+const MARKETPLACE_SUBMIT_URL = 'https://react-wp.com/plugins/submit';
+const SIX_HOURS =6 * 60 * 60 * 1000;
 const errorText = (error: unknown, fallback: string) => (error instanceof Error && error.message ? error.message : fallback);
 const when = (value: string | null) => (value ? new Date(value).toLocaleString() : '—');
 const price = (value: number) => (Number(value) > 0 ? `$${Number(value).toFixed(2)}` : 'Free');
@@ -185,6 +187,14 @@ function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; 
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [confirm, setConfirm] = useState(false);
+  const [confirmSubmit, setConfirmSubmit] = useState(false);
+
+  /** Opens the marketplace's own submit page with this repository filled in. Nothing is sent from here. */
+  const submitToMarketplace = () => {
+    const url = `${MARKETPLACE_SUBMIT_URL}?repo=${encodeURIComponent(`https://github.com/${product.source_repo}`)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+    setConfirmSubmit(false);
+  };
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -289,6 +299,22 @@ function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; 
           </p>
           {product.source_error && <p className={styles.error}>The last check could not use the release: {product.source_error}</p>}
           <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy !== ''} onClick={check}>{busy === 'check' ? 'Checking GitHub…' : 'Check for new release'}</button>
+
+          <h4 className={styles.panelTitle} style={{ marginTop: 14 }}>Publish in the React-WP marketplace</h4>
+          <p className={styles.hint}>
+            Want everyone to find this plugin? Press <strong>Submit to marketplace</strong>. It opens the marketplace's submit page with this repository filled in;
+            you confirm there (you need a react-wp.com account). Your plugin is <strong>not live yet</strong>: the marketplace scans it and sends it to the
+            marketplace owner, and it is published only once the owner approves it. Nothing is sent until you confirm on that page.
+          </p>
+          {confirmSubmit ? (
+            <div className={styles.row}>
+              <span>Open the marketplace to send <code>{product.source_repo}</code> to its owner for approval?</span>
+              <button type="button" className={styles.button} onClick={submitToMarketplace}>Yes, open the marketplace</button>
+              <button type="button" className={`${styles.button} ${styles.ghost}`} onClick={() => setConfirmSubmit(false)}>Cancel</button>
+            </div>
+          ) : (
+            <button type="button" className={styles.button} disabled={busy !== ''} onClick={() => setConfirmSubmit(true)}>Submit to marketplace</button>
+          )}
         </div>
       )}
 

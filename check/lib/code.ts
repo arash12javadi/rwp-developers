@@ -199,7 +199,7 @@ export function checkSource(
 
   // ----- security --------------------------------------------------------------------------------
   const unsafe: Array<[RegExp, Finding['severity'], string, string, string]> = [
-    [/(?<![.\w$])eval\s*\(/, 'error', 'security.eval', '`eval()` runs a string as code.', 'Remove it. Parse data with JSON.parse; never execute text.'],
+    [/(?<![.\w$])eval\s*\(/, 'error', 'security.eval', 'Calling `eval` runs a string as code.', 'Remove it. Parse data with JSON.parse; never execute text.'],
     [/\bnew\s+Function\s*\(/, 'error', 'security.new-function', '`new Function()` runs a string as code.', 'Remove it. A plugin must not compile code at run time.'],
     [/\bdocument\s*\.\s*write(?:ln)?\s*\(/, 'error', 'security.document-write', '`document.write()` injects markup that can carry script.', 'Render with React instead.'],
     [/\bimport\s*\(\s*['"`]https?:/, 'error', 'security.remote-import', 'The plugin loads code from a web address at run time. That code could change after you reviewed this one.', 'Bundle the dependency in the plugin instead of importing it from a URL.'],
