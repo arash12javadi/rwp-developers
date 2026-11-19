@@ -373,6 +373,13 @@ grant execute on function public.dev_my_licenses() to authenticated;
 
 revoke all on public.dev_secrets from anon, authenticated;
 grant all on public.dev_secrets to service_role;
+-- The server reads and writes these with the secret key. Newer Supabase projects no longer hand
+-- service_role table privileges by default, so grant them explicitly (else: "permission denied for table").
+grant all on public.dev_settings to service_role;
+grant all on public.dev_products to service_role;
+grant all on public.dev_versions to service_role;
+grant all on public.dev_orders to service_role;
+grant all on public.dev_licenses to service_role;
 revoke all on public.dev_orders from anon;
 revoke insert, update, delete on public.dev_orders from authenticated;
 revoke all on public.dev_licenses from anon;

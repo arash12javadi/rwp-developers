@@ -118,6 +118,9 @@ Nothing to set up. Sign in on your shop, buy or claim, download from *My purchas
 ## For maintainers
 
 - `schema.sql` / `uninstall.sql`: `dev_products`, `dev_versions`, `dev_orders`, `dev_licenses`, `dev_settings`, `dev_secrets`.
+  The schema is safe to re-run. If Payments & keys or the GitHub release import shows
+  `permission denied for table dev_settings` (HTTP 403), re-run `schema.sql` in the Supabase SQL editor: it grants
+  `service_role` access to the `dev_*` tables.
   RLS is on everywhere; `dev_secrets` has none (server only). `dev_place_order`, `dev_complete_order`, `dev_verify_license`
   and `dev_record_version` are service-role only.
 - `server.mjs` routes; `server/store.mjs` logic; `server/payments.mjs`, `server/license.mjs`, `server/secrets.mjs`,
