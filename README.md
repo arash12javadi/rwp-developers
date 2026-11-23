@@ -16,7 +16,7 @@ your own payment accounts**. Nothing is sent to react-wp.com, and react-wp.com i
 | Screen | What it is for |
 |---|---|
 | **Plugin Check** | Test a plugin ZIP in the browser before you install it ([details](./check/README.md)). |
-| **Your plugins** | Create plugins, upload versions (ZIP) or import a GitHub release, set a price, put them on sale. |
+| **Your plugins** | Create plugins, import a GitHub release (the default) or upload versions (ZIP), choose which of the two rules, set a price, put them on sale. |
 | **Sales & licences** | Every order and every licence key; revoke a key, release the site it is bound to. |
 | **Payments & key** | Your Stripe and NOWPayments credentials, your licence public key, your package storage. |
 | **`/store`** (and `[rwp_developer_store]`) | The public shop: what is on sale, buy or claim, "My purchases" with downloads. |
@@ -48,8 +48,14 @@ public GitHub repository and publish ordinary GitHub releases (see the marketpla
 ### Publish and sell a plugin
 
 1. **Developers → Your plugins → New plugin** (id = the `id` in your `manifest.json`, which cannot change later), or
-   **Import from a GitHub release** (a public repository with a published release; no token needed).
-2. Upload a **version**: the ZIP, with the version equal to `version` in its `manifest.json`. The package is scanned
+   **Import from a GitHub release** (a repository with a published release). A plugin you **sell** must come from a **private**
+   repository: paste a fine-grained GitHub token with read-only "Contents" access to that one repository (it is sealed in your
+   database with `RWP_SECRET_BOX_KEY` and never shown again; replace it any time under the plugin's *GitHub release* panel). A free
+   plugin from a public repository needs no token. A priced plugin whose repository is public is refused.
+2. Add a **version** from a GitHub release (it is read when you press *Check for new release*, and whenever the screen opens more than
+   six hours after the last look) or by uploading the **ZIP**, with the version equal to `version` in its `manifest.json`. **You choose which
+   source rules** (*Which source rules the live version*, default **the latest GitHub release**): the shop offers the newest published
+   version of that source, the other source is kept ready and used only until the chosen source has a version of its own. The package is scanned
    first: a *blocking* finding (no valid manifest, `eval`, a server secret) is never stored; *something to read* (network
    calls, storage access) is stored but **held back** until you publish it or tick "publish even if the scan finds
    something to read".
@@ -62,6 +68,10 @@ public GitHub repository and publish ordinary GitHub releases (see the marketpla
 
 A buyer signs in, pays (or claims a free plugin), and finds their **licence key** and a **Download** button under *My
 purchases*. They install the ZIP under *Plugins → Upload* and enter the key where your plugin asks for it.
+
+### Your marketplace plugins are listed here too
+
+When the Marketplace plugin is installed on the same Supabase project, every plugin whose author is the site owner (an administrator or super admin) is **mirrored** into *Developers → Your plugins* with a **Marketplace** badge, each time the list opens. **The Marketplace rules them**: title, price, status, version and GitHub release are changed in *Marketplace → Inventory → Manage* and are rewritten here at the next sync; a mirrored plugin cannot be edited, uploaded to, checked or deleted here, and this shop never sells it (the Marketplace does, with its own licences). A plugin of this shop with the same id as one of the owner's marketplace plugins is adopted (the Marketplace wins); one removed from the Marketplace is archived here, never deleted. On a developer's own site, without the Marketplace, nothing is mirrored. Re-apply `schema.sql` after updating (two new columns, `managed_by` and `marketplace_plugin_id`, and the public catalogue and order functions now skip mirrored rows). Plugins created only in this shop are not copied into the Marketplace: publish them there with *Submit to marketplace*.
 
 ### Checking a licence in your own plugin
 

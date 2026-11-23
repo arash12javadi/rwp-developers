@@ -17,7 +17,9 @@ import { vetFiles } from '../../../server/pluginVet.mjs';
 import { isCommercialPlugin } from '../../../src/lib/pluginLicense.js';
 import { isDevEditionPlugin } from '../../../src/lib/pluginEdition.js';
 import { HttpError, deletePackage, insert, readPackage, remove, rpc, select, signedPackageUrl, update, uploadPackage } from './supabase.mjs';
-import { clearSecret, licenseKeys, publicLicenseKey, readSecret, requireSecretBox, secretsStatus, writeSecret } from './secrets.mjs';
+import {
+  clearSecret, clearSourceToken, licenseKeys, publicLicenseKey, readSecret, readSourceToken, requireSecretBox, secretsStatus, writeSecret, writeSourceToken,
+} from './secrets.mjs';
 import { expiryDate, expiryStamp, newSerial, signLicenseKey, verifyLicenseKey } from './license.mjs';
 import {
   PROVIDER_LABELS, PROVIDERS, createNowPaymentsInvoice, createStripeSession, paymentChecks, paymentsConfigFrom,
@@ -114,6 +116,10 @@ const productPatch = (body, { creating }) => {
     if (!['draft', 'published', 'archived'].includes(String(body.status))) throw new HttpError(400, 'Choose draft, published or archived.');
     patch.status = String(body.status);
   }
+  if (body.release_source !== undefined) {
+    if (!['github', 'zip'].includes(String(body.release_source))) throw new HttpError(400, 'Choose "github" or "zip" as the source that rules.');
+    patch.release_source = String(body.release_source);
+  }
   return patch;
 };
 
@@ -126,7 +132,7 @@ export async function saveProduct(ctx, body, userId) {
       throw error;
     });
   }
-  const current = (await select(ctx, `dev_products?id=eq.${enc(id)}&select=id,slug,status,current_version`, 'service'))[0];
+  const current = (await select(ctx, `dev_products?id=eq.${enc(id)}&select=id,slug,status,current_version,release_source,source_repo,source_private,price`, 'service'))[0];
   if (!current) throw new HttpError(404, 'That plugin does not exist.');
   const patch = productPatch(body || {}, { creating: false });
   if (patch.slug && patch.slug !== current.slug) {
@@ -137,8 +143,14 @@ export async function saveProduct(ctx, body, userId) {
     const live = await select(ctx, `dev_versions?product_id=eq.${enc(id)}&status=eq.published&select=version&limit=1`, 'service');
     if (!live.length) throw new HttpError(409, 'Upload a version first: a plugin with no published version cannot be put on sale.');
   }
+  // The same rule as the marketplace: what is sold is read from a private repository.
+  const nextPrice = patch.price !== undefined ? patch.price : Number(current.price);
+  if (nextPrice > 0 && current.source_repo && !current.source_private) {
+    throw new HttpError(409, `${current.source_repo} is a public repository. The repository of a plugin that is sold must be private, so its source is not free for anyone to download. Make it private, save a read-only access token for it here, check for the release again, then set the price.`);
+  }
   const rows = await update(ctx, 'dev_products', `id=eq.${enc(id)}`, patch, 'service');
-  return rows[0];
+  if (patch.release_source && patch.release_source !== current.release_source) await settleCurrentVersion(ctx, id);
+  return (await select(ctx, `dev_products?id=eq.${enc(id)}&select=*`, 'service'))[0] || rows[0];
 }
 
 /** Deletes a plugin that was never ordered, with its stored packages. A plugin with orders is archived instead. */
@@ -148,6 +160,7 @@ export async function deleteProduct(ctx, id) {
   const orders = await select(ctx, `dev_orders?product_id=eq.${enc(id)}&select=id&limit=1`, 'service');
   if (orders.length) throw new HttpError(409, 'This plugin has orders and licences, which have to be kept. Archive it instead: it disappears from the shop and keeps working for people who bought it.');
   const versions = await select(ctx, `dev_versions?product_id=eq.${enc(id)}&select=storage_path`, 'service');
+  await clearSourceToken(ctx, id).catch(() => {});
   await remove(ctx, 'dev_products', `id=eq.${enc(id)}`);
   await Promise.all(versions.map((row) => deletePackage(ctx, row.storage_path)));
   return { deleted: true, slug: product.slug };
@@ -155,11 +168,16 @@ export async function deleteProduct(ctx, id) {
 
 /* ------------------------------------------------------------------------------------------ versions */
 
-/** Which version the shop offers after a change: the highest published one. */
+/**
+ * Which version the shop offers after a change: the highest published version of the source the owner prefers (a GitHub release by
+ * default, or an uploaded ZIP). Until that source has a published version of its own, the other source's is offered.
+ */
 async function settleCurrentVersion(ctx, productId) {
-  const rows = await select(ctx, `dev_versions?product_id=eq.${enc(productId)}&status=eq.published&select=version`, 'service');
-  const best = rows.map((row) => row.version).sort((a, b) => compareVersions(b, a))[0] || '';
-  const product = (await select(ctx, `dev_products?id=eq.${enc(productId)}&select=status`, 'service'))[0];
+  const rows = await select(ctx, `dev_versions?product_id=eq.${enc(productId)}&status=eq.published&select=version,source`, 'service');
+  const product = (await select(ctx, `dev_products?id=eq.${enc(productId)}&select=status,release_source`, 'service'))[0];
+  const preferred = product?.release_source === 'zip' ? 'zip' : 'github';
+  const own = rows.filter((row) => row.source === preferred);
+  const best = (own.length ? own : rows).map((row) => row.version).sort((a, b) => compareVersions(b, a))[0] || '';
   await update(ctx, 'dev_products', `id=eq.${enc(productId)}`, {
     current_version: best,
     ...(product?.status === 'published' && !best ? { status: 'draft' } : {}),
@@ -197,14 +215,15 @@ export async function storeVersion(ctx, { product, version, changelog, bytes, ac
   const status = severity === 'clean' || acceptFindings ? 'published' : 'held';
   const path = `${product.slug}/${wanted}/${product.slug}-${wanted}.zip`;
   await uploadPackage(ctx, path, packed.zip);
-  const makeCurrent = status === 'published' && (!product.current_version || compareVersions(wanted, product.current_version) > 0);
   const recorded = await rpc(ctx, 'dev_record_version', {
     p: {
       product_id: product.id, version: wanted, storage_path: path, sha256: sha256Hex(packed.zip), size: packed.zip.length,
-      changelog: String(changelog || '').slice(0, 8000), vet_report: { ...report, severity }, status, make_current: makeCurrent, created_by: userId,
+      changelog: String(changelog || '').slice(0, 8000), vet_report: { ...report, severity }, status, make_current: false, created_by: userId,
     },
   }, 'service');
-  return { ...recorded, severity, report: { ...report, severity }, held: status === 'held', sha256: sha256Hex(packed.zip) };
+  // The preferred source decides which published version the shop offers, not the order things arrive in.
+  const current = status === 'published' ? await settleCurrentVersion(ctx, product.id) : product.current_version || '';
+  return { ...recorded, current: current === wanted, current_version: current, severity, report: { ...report, severity }, held: status === 'held', sha256: sha256Hex(packed.zip) };
 }
 
 export async function uploadVersion(ctx, { productId, version, changelog, bytes, acceptFindings, userId }) {
@@ -228,14 +247,15 @@ export async function setVersionStatus(ctx, { versionId, status }) {
 /**
  * Brings the latest GitHub release of a repository into the shop. With `productId` it is a new version of that plugin
  * (the repository is linked on first use and is then the only source); without it a new draft plugin is created from the
- * release's manifest. Public repositories only, read exactly like the marketplace does.
+ * release's manifest. A free plugin comes from a public repository, a plugin for sale from a private one (read with its own sealed token), read
+ * exactly like the marketplace does. `token` is a token the owner just pasted; without one the stored token is used.
  */
 export async function importFromRelease(ctx, { productId, repositoryUrl, acceptFindings, userId, fetchImpl = fetch, token = '' }) {
   const repository = productId
     ? null
     : (() => { try { return parseRepositoryUrl(repositoryUrl); } catch (error) { throw asHttp(error); } })();
   let product = productId
-    ? (await select(ctx, `dev_products?id=eq.${enc(productId)}&select=id,slug,current_version,source_repo,source_repo_id`, 'service'))[0]
+    ? (await select(ctx, `dev_products?id=eq.${enc(productId)}&select=id,slug,current_version,source_repo,source_repo_id,price,source_private`, 'service'))[0]
     : null;
   if (productId && !product) throw new HttpError(404, 'That plugin does not exist.');
   const address = product?.source_repo ? `https://github.com/${product.source_repo}` : repositoryUrl;
@@ -245,9 +265,14 @@ export async function importFromRelease(ctx, { productId, repositoryUrl, acceptF
     if (linked[0]) throw new HttpError(409, `${repository.fullName} is already linked to "${linked[0].slug}". Open that plugin and check it for a new release.`);
   }
 
+  const privateToken = String(token || '').trim() || (product && (product.source_private || Number(product.price) > 0) ? await readSourceToken(ctx, product.id) : '');
+  if (privateToken) requireSecretBox();
   let candidate;
   try {
-    candidate = await resolveReleaseCandidate(address, { expectedSlug: product?.slug || '', token, isOwner: true, fetchImpl });
+    candidate = await resolveReleaseCandidate(address, {
+      expectedSlug: product?.slug || '', isOwner: true, fetchImpl,
+      allowPrivate: Boolean(privateToken), privateToken, requirePrivate: Number(product?.price) > 0,
+    });
   } catch (error) {
     if (product) await update(ctx, 'dev_products', `id=eq.${enc(product.id)}`, { source_checked_at: new Date().toISOString(), source_error: String(error?.message || error).slice(0, 600) }, 'service').catch(() => {});
     throw asHttp(error);
@@ -275,9 +300,10 @@ export async function importFromRelease(ctx, { productId, repositoryUrl, acceptF
     }, 'service');
   }
   await update(ctx, 'dev_products', `id=eq.${enc(product.id)}`, {
-    source_repo: candidate.repository.fullName.toLowerCase(), source_repo_id: candidate.repository.id,
+    source_repo: candidate.repository.fullName.toLowerCase(), source_repo_id: candidate.repository.id, source_private: Boolean(candidate.repository.private),
     source_checked_at: new Date().toISOString(), source_last_tag: candidate.release.tag, source_error: '',
   }, 'service');
+  if (candidate.repository.private && String(token || '').trim()) await writeSourceToken(ctx, product.id, token);
 
   // The package was already scanned and re-packed by the release reader; storeVersion scans the stored bytes again, so
   // what is judged is exactly what is kept.

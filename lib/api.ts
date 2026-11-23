@@ -47,12 +47,14 @@ export const releaseMyDomain = (licenseId: string) => post<{ released: boolean }
 /* -------------------------------------------------------------------------------------------- the owner */
 export const adminStatus = () => get<PaymentStatus>('admin/status');
 export const savePayments = (input: PaymentSettingsInput) => post<PaymentStatus>('admin/payments/save', input as unknown as Record<string, unknown>);
+/** Copies the owner's marketplace plugins into this list. Answers `available: false` when the marketplace is not installed. */
+export const syncMarketplace = () => post<{ available: boolean; created: number; updated: number; archived: number; errors: string[] }>('admin/marketplace/sync');
 export const prepareBucket = () => post<{ ready: boolean }>('admin/bucket/prepare');
 export const saveProduct = (input: Partial<DevProduct> & { id?: string }) => post<{ product: DevProduct }>('admin/products/save', input as Record<string, unknown>);
 export const deleteProduct = (id: string) => post<{ deleted: boolean }>('admin/products/delete', { id });
 export const setVersionStatus = (versionId: string, status: 'published' | 'withdrawn') => post<{ current_version: string }>('admin/versions/status', { version_id: versionId, status });
 export const verifyStored = (versionId: string) => post<{ ok: boolean }>('admin/versions/verify', { version_id: versionId });
-export const importRelease = (input: { repository_url?: string; product_id?: string; accept_findings?: boolean }) => post<ImportResult>('admin/source/import', input);
+export const importRelease = (input: { repository_url?: string; product_id?: string; accept_findings?: boolean; token?: string }) => post<ImportResult>('admin/source/import', input);
 
 /** The ZIP goes as multipart, so a large package is not base64-inflated into a JSON body. */
 export const uploadVersion = (input: { productId: string; version: string; changelog: string; file: File; acceptFindings: boolean }) => {

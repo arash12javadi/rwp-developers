@@ -20,6 +20,7 @@ import {
   releaseDomain, saveProduct, savePayments, setVersionStatus, startCheckout, uploadVersion, verifyKey, verifyStoredPackage, MAX_PACKAGE_BYTES,
 } from './server/store.mjs';
 import { verifySnippet } from './server/license.mjs';
+import { refuseManaged, syncMarketplaceMirror } from './server/marketplaceMirror.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const enc = encodeURIComponent;
@@ -221,15 +222,23 @@ const developersServer = {
       return { status: 200, body: { ready: true } };
     },
 
+    // Copies the owner's marketplace plugins into this list (the marketplace rules them). Quiet when the marketplace is not installed.
+    'POST admin/marketplace/sync': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await syncMarketplaceMirror(ctx) };
+    },
+
     'POST admin/products/save': async (ctx) => {
       await requireOwner(ctx);
       const user = await signedIn(ctx);
+      if (ctx.json()?.id) await refuseManaged(ctx, { productId: isUuid(ctx.json().id) });
       const saved = await saveProduct(ctx, ctx.json() || {}, user.id);
       return { status: 200, body: { product: saved } };
     },
 
     'POST admin/products/delete': async (ctx) => {
       await requireOwner(ctx);
+      await refuseManaged(ctx, { productId: isUuid(ctx.json()?.id) });
       return { status: 200, body: await deleteProduct(ctx, isUuid(ctx.json()?.id)) };
     },
 
@@ -239,6 +248,7 @@ const developersServer = {
       const parsed = parseMultipart(ctx);
       if (!parsed?.file) throw new HttpError(400, 'Choose the plugin ZIP to upload.');
       const fields = parsed.fields;
+      await refuseManaged(ctx, { productId: isUuid(fields.product_id) });
       const result = await uploadVersion(ctx, {
         productId: isUuid(fields.product_id), version: fields.version, changelog: fields.changelog,
         bytes: new Uint8Array(parsed.file), acceptFindings: fields.accept_findings === 'true', userId: user.id,
@@ -249,11 +259,13 @@ const developersServer = {
     'POST admin/versions/status': async (ctx) => {
       await requireOwner(ctx);
       const body = ctx.json() || {};
+      await refuseManaged(ctx, { versionId: isUuid(body.version_id, 'version') });
       return { status: 200, body: await setVersionStatus(ctx, { versionId: isUuid(body.version_id, 'version'), status: String(body.status || '') }) };
     },
 
     'POST admin/versions/verify': async (ctx) => {
       await requireOwner(ctx);
+      await refuseManaged(ctx, { versionId: isUuid(ctx.json()?.version_id, 'version') });
       return { status: 200, body: await verifyStoredPackage(ctx, isUuid(ctx.json()?.version_id, 'version')) };
     },
 
@@ -265,8 +277,9 @@ const developersServer = {
       const body = ctx.json() || {};
       const productId = body.product_id ? isUuid(body.product_id) : '';
       if (!productId && !String(body.repository_url || '').trim()) throw new HttpError(400, 'Enter the address of the GitHub repository.');
+      if (productId) await refuseManaged(ctx, { productId });
       const result = await importFromRelease(ctx, {
-        productId, repositoryUrl: body.repository_url, acceptFindings: body.accept_findings === true, userId: user.id,
+        productId, repositoryUrl: body.repository_url, acceptFindings: body.accept_findings === true, userId: user.id, token: body.token,
       });
       return { status: 200, body: result };
     },

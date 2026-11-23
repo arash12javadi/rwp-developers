@@ -51,6 +51,24 @@ create table if not exists public.dev_versions (
 );
 create index if not exists dev_versions_product_idx on public.dev_versions(product_id, created_at desc);
 
+-- Two ways to publish, one rule for which one rules: a plugin's live version is the newest published version of its preferred source
+-- (`release_source`: the latest GitHub release, the default, or an uploaded ZIP). Until the preferred source has a published version of its
+-- own, the other source's is offered, so a shop window is never empty because of the preference.
+alter table public.dev_products add column if not exists release_source text not null default 'github';
+alter table public.dev_products drop constraint if exists dev_products_release_source_check;
+alter table public.dev_products add constraint dev_products_release_source_check check (release_source in ('github', 'zip'));
+-- A plugin for sale is read from a private repository, with its own read-only token (sealed in dev_secrets, never in this table).
+alter table public.dev_products add column if not exists source_private boolean not null default false;
+-- A plugin the site owner publishes in the react-wp.com marketplace (rwp-plugin-marketplace, when it is installed on the same project) is
+-- mirrored here so the owner sees every plugin in one list. The marketplace rules: a mirrored row (`managed_by = 'marketplace'`) is rewritten
+-- from the marketplace on every sync, cannot be edited, uploaded to or deleted here, and is never sold by this shop (the marketplace sells it).
+alter table public.dev_products add column if not exists managed_by text not null default '';
+alter table public.dev_products drop constraint if exists dev_products_managed_by_check;
+alter table public.dev_products add constraint dev_products_managed_by_check check (managed_by in ('', 'marketplace'));
+alter table public.dev_products add column if not exists marketplace_plugin_id uuid;
+-- Where a version came from, derived so it cannot disagree with its report: the release reader records `source` in the scan report, an upload does not.
+alter table public.dev_versions add column if not exists source text generated always as (case when vet_report -> 'source' is not null then 'github' else 'zip' end) stored;
+
 create table if not exists public.dev_orders (
   id uuid primary key default gen_random_uuid(),
   product_id uuid not null references public.dev_products(id) on delete restrict,
@@ -127,7 +145,7 @@ alter table public.dev_secrets enable row level security;
 drop policy if exists "Public reads published products" on public.dev_products;
 create policy "Public reads published products"
   on public.dev_products for select to anon, authenticated
-  using (status = 'published');
+  using (status = 'published' and managed_by = '');
 
 drop policy if exists "Owners manage developer products" on public.dev_products;
 create policy "Owners manage developer products"
@@ -179,7 +197,7 @@ returns jsonb language sql stable security definer set search_path = public as $
   ) order by p.title), '[]'::jsonb)
   from public.dev_products p
   join public.dev_versions v on v.product_id = p.id and v.version = p.current_version and v.status = 'published'
-  where p.status = 'published';
+  where p.status = 'published' and p.managed_by = '';
 $$;
 
 -- Opens an order at the stored price. service_role only: the browser can ask for a product, never for an amount.
@@ -192,7 +210,7 @@ begin
   if auth.role() <> 'service_role' then
     raise exception 'Only the server can open an order.' using errcode = '42501';
   end if;
-  select * into v_product from public.dev_products where id = p_product and status = 'published';
+  select * into v_product from public.dev_products where id = p_product and status = 'published' and managed_by = '';
   if v_product.id is null or not exists (
     select 1 from public.dev_versions v where v.product_id = v_product.id and v.version = v_product.current_version and v.status = 'published'
   ) then

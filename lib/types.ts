@@ -11,9 +11,15 @@ export interface DevProduct {
   status: ProductStatus;
   current_version: string;
   source_repo: string;
+  /** Which source rules the version the shop offers: the latest GitHub release (the default) or the newest uploaded ZIP. */
+  release_source: 'github' | 'zip';
+  /** True when the repository is private (a plugin for sale); its read-only token is sealed on the server. */
+  source_private: boolean;
   source_checked_at: string | null;
   source_last_tag: string;
   source_error: string;
+  /** 'marketplace' = a mirror of one of the owner's marketplace plugins: the marketplace rules it, so it is read-only here. */
+  managed_by?: '' | 'marketplace';
   created_at: string;
 }
 
@@ -28,6 +34,8 @@ export interface DevVersion {
   size: number;
   changelog: string;
   status: 'published' | 'held' | 'withdrawn';
+  /** Where it came from: a GitHub release or an uploaded ZIP. */
+  source?: 'github' | 'zip';
   vet_report: VetReportShape;
   created_at: string;
 }

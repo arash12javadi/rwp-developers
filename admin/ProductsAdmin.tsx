@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import {
-  deleteProduct, importRelease, listProducts, listVersions, saveProduct, setVersionStatus, uploadVersion, verifyStored,
+  deleteProduct, importRelease, listProducts, listVersions, saveProduct, setVersionStatus, syncMarketplace, uploadVersion, verifyStored,
 } from '../lib/api';
 import type { DevProduct, DevVersion, ImportResult, UploadResult, VetReportShape } from '../lib/types';
 import styles from '../developers.module.css';
@@ -141,7 +141,7 @@ function VersionsPanel({ product, onChanged }: { product: DevProduct; onChanged:
       {!versions ? <p className={styles.muted}>Loading versions…</p> : !versions.length ? <p className={styles.hint}>No version uploaded yet.</p> : (
         <div className={styles.tableWrap}>
           <table className={styles.table}>
-            <thead><tr><th>Version</th><th>Status</th><th>Size</th><th>Uploaded</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Version</th><th>Status</th><th>Source</th><th>Size</th><th>Uploaded</th><th>Actions</th></tr></thead>
             <tbody>
               {versions.map((entry) => (
                 <tr key={entry.id}>
@@ -152,6 +152,7 @@ function VersionsPanel({ product, onChanged }: { product: DevProduct; onChanged:
                     <br /><code title={entry.sha256}>{entry.sha256.slice(0, 12)}</code>
                   </td>
                   <td><span className={`${styles.badge} ${styles[entry.status]}`}>{entry.status}</span></td>
+                  <td>{entry.source === 'github' ? 'GitHub release' : 'ZIP upload'}</td>
                   <td>{sizeLabel(entry.size)}</td>
                   <td>{when(entry.created_at)}</td>
                   <td>
@@ -183,6 +184,8 @@ function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; 
   const [amount, setAmount] = useState(String(product.price));
   const [days, setDays] = useState(product.license_days ? String(product.license_days) : '');
   const [status, setStatus] = useState(product.status);
+  const [releaseSource, setReleaseSource] = useState<'github' | 'zip'>(product.release_source === 'zip' ? 'zip' : 'github');
+  const [token, setToken] = useState('');
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -202,7 +205,7 @@ function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; 
     setError('');
     setMessage('');
     try {
-      await saveProduct({ id: product.id, title, description, category, price: Number(amount), license_days: days.trim() ? Number(days) : null, status });
+      await saveProduct({ id: product.id, title, description, category, price: Number(amount), license_days: days.trim() ? Number(days) : null, status, release_source: releaseSource });
       setMessage('Saved.');
       onChanged();
     } catch (saveError) {
@@ -212,12 +215,13 @@ function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; 
     }
   };
 
-  const check = async () => {
+  const check = async (newToken = '') => {
     setBusy('check');
     setError('');
     setMessage('');
     try {
-      const result = await importRelease({ product_id: product.id });
+      const result = await importRelease({ product_id: product.id, ...(newToken ? { token: newToken } : {}) });
+      if (newToken) setToken('');
       setMessage(result.changed
         ? `Release ${result.tag || result.version} was found, scanned and stored.${result.held ? ' It is held back until you publish it below.' : ''}`
         : (result.message || 'There is no newer release.'));
@@ -244,6 +248,24 @@ function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; 
     }
   };
 
+  if (product.managed_by === 'marketplace') {
+    return (
+      <div className={styles.panel}>
+        <h3 className={styles.panelTitle}>{product.title} <span className={styles.muted}>({product.slug})</span></h3>
+        <p className={styles.notice} role="status">
+          This plugin is managed by the <strong>Marketplace</strong>, which rules it and sells it. It is shown here so every plugin of yours is in one list;
+          its title, price, status, versions and GitHub release are changed in Marketplace → Inventory → Manage, and the change shows up here the next time
+          this list opens. The developer shop does not sell it.
+        </p>
+        <ul className={styles.hint}>
+          <li>Price: {price(product.price)} · Status: {product.status === 'published' ? 'live in the marketplace' : product.status} · Version: {product.current_version || '—'}</li>
+          {product.source_repo && <li>GitHub: <code>{product.source_repo}</code>{product.source_private ? ' (private)' : ''}{product.source_last_tag ? ' · latest seen ' + product.source_last_tag : ''} · last checked {when(product.source_checked_at)}</li>}
+          {product.source_error && <li className={styles.error}>The last release check failed: {product.source_error}</li>}
+        </ul>
+      </div>
+    );
+  }
+
   return (
     <div className={styles.panel}>
       <h3 className={styles.panelTitle}>{product.title} <span className={styles.muted}>({product.slug})</span></h3>
@@ -269,6 +291,13 @@ function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; 
             <label htmlFor={`d-${product.id}`}>Licence lasts (days)</label>
             <input id={`d-${product.id}`} className={styles.input} type="number" min="1" max="3650" value={days} placeholder="Lifetime" disabled={busy !== ''} onChange={(event) => setDays(event.target.value)} />
           </div>
+          <div className={styles.field} style={{ flex: '0 1 200px' }}>
+            <label htmlFor={`r-${product.id}`}>Which source rules the live version</label>
+            <select id={`r-${product.id}`} className={styles.select} value={releaseSource} disabled={busy !== ''} onChange={(event) => setReleaseSource(event.target.value === 'zip' ? 'zip' : 'github')}>
+              <option value="github">Latest GitHub release (default)</option>
+              <option value="zip">Newest uploaded ZIP</option>
+            </select>
+          </div>
           <div className={styles.field} style={{ flex: '0 1 150px' }}>
             <label htmlFor={`s-${product.id}`}>In the shop</label>
             <select id={`s-${product.id}`} className={styles.select} value={status} disabled={busy !== ''} onChange={(event) => setStatus(event.target.value as DevProduct['status'])}>
@@ -284,6 +313,7 @@ function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; 
         </div>
         <p className={styles.hint}>
           {product.current_version ? `The shop offers version ${product.current_version}.` : 'No version is published yet, so this plugin cannot be put on sale.'}
+          {' '}The shop offers the newest published version of the source you choose; until that source has a version, the other one is offered.
           {' '}The id <code>{product.slug}</code> cannot change: licence keys are issued for it.
         </p>
         <button type="submit" className={styles.button} disabled={busy !== ''}>{busy === 'save' ? 'Saving…' : 'Save'}</button>
@@ -293,20 +323,31 @@ function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; 
         <div style={{ marginTop: 14 }}>
           <h4 className={styles.panelTitle}>GitHub release</h4>
           <p className={styles.hint}>
-            Linked to <a href={`https://github.com/${product.source_repo}`} target="_blank" rel="noreferrer">{product.source_repo}</a>.
+            Linked to {product.source_private
+              ? <code>{product.source_repo}</code>
+              : <a href={`https://github.com/${product.source_repo}`} target="_blank" rel="noreferrer">{product.source_repo}</a>}{product.source_private ? ' (private)' : ''}.
             Its latest release is read when you press the button, and whenever this screen opens more than six hours after the last look.
             {product.source_last_tag ? ` Latest seen: ${product.source_last_tag}.` : ''} Last checked {when(product.source_checked_at)}.
           </p>
           {product.source_error && <p className={styles.error}>The last check could not use the release: {product.source_error}</p>}
-          <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy !== ''} onClick={check}>{busy === 'check' ? 'Checking GitHub…' : 'Check for new release'}</button>
+          <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy !== ''} onClick={() => check()}>{busy === 'check' ? 'Checking GitHub…' : 'Check for new release'}</button>
+          {(product.source_private || Number(product.price) > 0) && (
+            <div className={styles.field} style={{ marginTop: 10 }}>
+              <label htmlFor={`k-${product.id}`}>Replace the repository access token</label>
+              <input id={`k-${product.id}`} className={styles.input} type="password" autoComplete="off" spellCheck={false} value={token} disabled={busy !== ''}
+                placeholder="github_pat_… (read-only “Contents” access to this one repository)" onChange={(event) => setToken(event.target.value)} />
+              <p className={styles.hint}>A plugin you sell comes from a private repository. The token is sealed in your database and never shown again.</p>
+              <button type="button" className={styles.button} disabled={busy !== '' || token.trim().length < 20} onClick={() => check(token.trim())}>Save token and check</button>
+            </div>
+          )}
 
-          <h4 className={styles.panelTitle} style={{ marginTop: 14 }}>Publish in the React-WP marketplace</h4>
-          <p className={styles.hint}>
+          {!product.source_private && <h4 className={styles.panelTitle} style={{ marginTop: 14 }}>Publish in the React-WP marketplace</h4>}
+          {!product.source_private && <p className={styles.hint}>
             Want everyone to find this plugin? Press <strong>Submit to marketplace</strong>. It opens the marketplace's submit page with this repository filled in;
             you confirm there (you need a react-wp.com account). Your plugin is <strong>not live yet</strong>: the marketplace scans it and sends it to the
             marketplace owner, and it is published only once the owner approves it. Nothing is sent until you confirm on that page.
-          </p>
-          {confirmSubmit ? (
+          </p>}
+          {!product.source_private && (confirmSubmit ? (
             <div className={styles.row}>
               <span>Open the marketplace to send <code>{product.source_repo}</code> to its owner for approval?</span>
               <button type="button" className={styles.button} onClick={submitToMarketplace}>Yes, open the marketplace</button>
@@ -314,7 +355,7 @@ function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; 
             </div>
           ) : (
             <button type="button" className={styles.button} disabled={busy !== ''} onClick={() => setConfirmSubmit(true)}>Submit to marketplace</button>
-          )}
+          ))}
         </div>
       )}
 
@@ -344,13 +385,15 @@ export default function ProductsAdmin() {
   const [slug, setSlug] = useState('');
   const [title, setTitle] = useState('');
   const [repo, setRepo] = useState('');
+  const [repoToken, setRepoToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const autoChecked = useRef(false);
 
   const load = useCallback(() => {
-    listProducts().then(setProducts).catch((loadError: unknown) => { setProducts([]); setError(errorText(loadError, 'Could not load your plugins. Has the Developers plugin been activated so its database schema is installed?')); });
+    // The owner's marketplace plugins are mirrored first (quietly: a site without the marketplace just answers ).
+    syncMarketplace().catch(() => undefined).then(() => listProducts()).then(setProducts).catch((loadError: unknown) => { setProducts([]); setError(errorText(loadError, 'Could not load your plugins. Has the Developers plugin been activated so its database schema is installed?')); });
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -358,7 +401,7 @@ export default function ProductsAdmin() {
   useEffect(() => {
     if (!products || autoChecked.current) return;
     autoChecked.current = true;
-    const due = products.filter((product) => product.source_repo && (!product.source_checked_at || Date.now() - Date.parse(product.source_checked_at) > SIX_HOURS)).slice(0, 3);
+    const due = products.filter((product) => product.source_repo && !product.managed_by && (!product.source_checked_at || Date.now() - Date.parse(product.source_checked_at) > SIX_HOURS)).slice(0, 3);
     if (!due.length) return;
     void (async () => {
       for (const product of due) await importRelease({ product_id: product.id }).catch(() => undefined);
@@ -392,8 +435,9 @@ export default function ProductsAdmin() {
     setError('');
     setMessage('');
     try {
-      const result = await importRelease({ repository_url: repo.trim() });
+      const result = await importRelease({ repository_url: repo.trim(), ...(repoToken.trim() ? { token: repoToken.trim() } : {}) });
       setRepo('');
+      setRepoToken('');
       setMode('');
       setMessage(`“${result.slug}” ${result.version} was imported from ${result.tag}. ${result.held ? 'The scan found something to read, so it is held back until you publish it.' : 'It is a draft: set its price and put it on sale.'}`);
       load();
@@ -411,7 +455,7 @@ export default function ProductsAdmin() {
     <div className={styles.wrap}>
       <h2 className={styles.title}>Your plugins</h2>
       <p className={styles.subtitle}>
-        Publish plugins from this site: upload a ZIP or import a GitHub release, set a price (or leave it free), and sell them
+        Publish plugins from this site: import a GitHub release (the default) or upload a ZIP, choose which of the two rules the version your shop offers, set a price (or leave it free), and sell them
         with your own payment accounts. Each version is scanned before it is stored; packages sit in your own private storage.
       </p>
       {error && <p className={styles.error} role="alert">{error}</p>}
@@ -445,9 +489,14 @@ export default function ProductsAdmin() {
             <label htmlFor="gh-repo">Repository address</label>
             <input id="gh-repo" className={styles.input} value={repo} required spellCheck={false} placeholder="https://github.com/you/your-plugin" disabled={busy} onChange={(event) => setRepo(event.target.value)} />
           </div>
+          <div className={styles.field}>
+            <label htmlFor="gh-token">Access token (only for a private repository)</label>
+            <input id="gh-token" className={styles.input} type="password" autoComplete="off" spellCheck={false} value={repoToken} placeholder="github_pat_… (leave empty for a public repository)" disabled={busy} onChange={(event) => setRepoToken(event.target.value)} />
+          </div>
           <p className={styles.hint}>
-            A public repository with a published release (tag such as <code>v1.0.0</code>, equal to <code>version</code> in its <code>manifest.json</code>).
-            The release is read, scanned and copied into your private storage. No token is needed.
+            A repository with a published release (tag such as <code>v1.0.0</code>, equal to <code>version</code> in its <code>manifest.json</code>).
+            The release is read, scanned and copied into your private storage. A plugin you <strong>sell</strong> must come from a <strong>private</strong> repository: paste a
+            fine-grained token with read-only &ldquo;Contents&rdquo; access to that one repository. It is sealed in your database and never shown again. A free plugin from a public repository needs no token.
           </p>
           <button type="submit" className={styles.button} disabled={busy}>{busy ? 'Reading the release…' : 'Import'}</button>
         </form>
@@ -463,10 +512,10 @@ export default function ProductsAdmin() {
               <tbody>
                 {products.map((product) => (
                   <tr key={product.id}>
-                    <td><strong>{product.title}</strong><br /><span className={styles.muted}>{product.slug}{product.source_repo ? ` · ${product.source_repo}` : ''}</span></td>
+                    <td><strong>{product.title}</strong>{product.managed_by === 'marketplace' && <> <span className={styles.badge}>Marketplace</span></>}<br /><span className={styles.muted}>{product.slug}{product.source_repo ? ` · ${product.source_repo}` : ''}</span></td>
                     <td>{price(product.price)}</td>
                     <td>{product.current_version || '—'}</td>
-                    <td><span className={`${styles.badge} ${styles[product.status]}`}>{product.status === 'published' ? 'on sale' : product.status}</span></td>
+                    <td><span className={`${styles.badge} ${styles[product.status]}`}>{product.status === 'published' ? (product.managed_by === 'marketplace' ? 'live (marketplace)' : 'on sale') : product.status}</span></td>
                     <td><button type="button" className={`${styles.button} ${styles.ghost}`} onClick={() => setOpenId(openId === product.id ? '' : product.id)}>{openId === product.id ? 'Close' : 'Manage'}</button></td>
                   </tr>
                 ))}

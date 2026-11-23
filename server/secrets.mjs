@@ -100,3 +100,36 @@ export async function licenseKeys(ctx) {
   await update(ctx, 'dev_settings', 'id=eq.true', { license_public_key: pair.publicKey }, 'service');
   return { privateKey: pair.privateKey, publicKey: pair.publicKey };
 }
+
+/* ------------------------------------------------------------------------ a private repository's read token */
+
+/** The name one product's repository token is kept under (the table's name rule has no hyphens, a UUID has). */
+const sourceTokenName = (productId) => `gh_${String(productId).replace(/-/g, '_')}`;
+
+/** The read-only token of a product's private repository: sealed, never returned by any route, '' when none is stored. */
+export async function readSourceToken(ctx, productId) {
+  const rows = await select(ctx, `dev_secrets?name=eq.${encodeURIComponent(sourceTokenName(productId))}&select=value`, 'service');
+  if (!rows[0]) return '';
+  try {
+    return openSecret(rows[0].value);
+  } catch (error) {
+    throw new HttpError(503, error instanceof Error ? error.message : 'A stored repository token could not be opened.');
+  }
+}
+
+export async function writeSourceToken(ctx, productId, token) {
+  const text = String(token || '').trim();
+  if (text.length < 20 || text.length > 255 || /\s/.test(text)) {
+    throw new HttpError(400, 'That does not look like a GitHub access token. Create a fine-grained token with read-only "Contents" access to this one repository and paste it whole.');
+  }
+  requireSecretBox();
+  await upsert(ctx, 'dev_secrets', { name: sourceTokenName(productId), value: sealSecret(text), updated_at: new Date().toISOString() }, 'name');
+}
+
+export async function clearSourceToken(ctx, productId) {
+  const response = await fetch(`${ctx.supabase.url.replace(/\/$/, '')}/rest/v1/dev_secrets?name=eq.${encodeURIComponent(sourceTokenName(productId))}`, {
+    method: 'DELETE',
+    headers: { apikey: ctx.supabase.secretKey, Authorization: `Bearer ${ctx.supabase.secretKey}`, Prefer: 'return=minimal' },
+  });
+  if (!response.ok) throw new HttpError(500, 'The repository token could not be removed.');
+}
