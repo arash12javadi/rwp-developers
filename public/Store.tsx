@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { getSupabaseClient } from '../../../src/lib/db';
 import {
-  claimPlugin, downloadMine, loadStore, myLicenses, releaseMyDomain, startCheckout,
+  askForRefund, claimPlugin, downloadMine, loadStore, myLicenses, myRefunds, releaseMyDomain, startCheckout, withdrawRefund,
 } from '../lib/api';
-import type { MyLicense, StoreCatalog, StoreProduct } from '../lib/types';
+import type { DevRefund, DevRefundStatus, MyLicense, StoreCatalog, StoreProduct } from '../lib/types';
 import styles from '../developers.module.css';
 
 const errorText = (error: unknown, fallback: string) => (error instanceof Error && error.message ? error.message : fallback);
@@ -29,6 +29,7 @@ export default function Store({ title = 'Plugins', intro = '' }: { title?: strin
   const user = useUser();
   const [catalog, setCatalog] = useState<StoreCatalog | null>(null);
   const [licenses, setLicenses] = useState<MyLicense[]>([]);
+  const [refunds, setRefunds] = useState<DevRefund[]>([]);
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -37,6 +38,8 @@ export default function Store({ title = 'Plugins', intro = '' }: { title?: strin
 
   const loadLicenses = useCallback(async () => {
     try { setLicenses(await myLicenses()); } catch { setLicenses([]); }
+    // Refund requests are a convenience on top of the list: if they cannot be read, the licences still show.
+    try { setRefunds(await myRefunds()); } catch { setRefunds([]); }
   }, []);
 
   useEffect(() => {
@@ -144,7 +147,7 @@ export default function Store({ title = 'Plugins', intro = '' }: { title?: strin
           <h2 className={styles.panelTitle}>My purchases</h2>
           <div className={styles.tableWrap}>
             <table className={styles.table}>
-              <thead><tr><th>Plugin</th><th>Licence key</th><th>Expires</th><th>Site</th><th /></tr></thead>
+              <thead><tr><th>Plugin</th><th>Licence key</th><th>Expires</th><th>Site</th><th /><th>Refund</th></tr></thead>
               <tbody>
                 {licenses.map((license) => (
                   <tr key={license.id}>
@@ -158,6 +161,13 @@ export default function Store({ title = 'Plugins', intro = '' }: { title?: strin
                         : <span className={`${styles.badge} ${styles.revoked}`}>revoked</span>}
                       {license.domain && <> <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy !== ''} onClick={() => release(license)}>Move to another site</button></>}
                     </td>
+                    <td>
+                      <RefundCell
+                        license={license}
+                        requests={refunds.filter((row) => row.order_id === license.order_id)}
+                        onDone={async (text) => { await loadLicenses(); setMessage(text); }}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -165,9 +175,92 @@ export default function Store({ title = 'Plugins', intro = '' }: { title?: strin
           </div>
           <p className={styles.hint}>
             To use a plugin, install the ZIP from Plugins → Upload on your site and enter the licence key where the plugin asks for it.
+            To ask for your money back, use <strong>Ask for a refund</strong>: the shop answers here. A full refund ends the licence.
           </p>
         </section>
       )}
+    </div>
+  );
+}
+
+const REFUND_STATUS: Record<DevRefundStatus, string> = {
+  requested: 'Refund asked, waiting for the shop',
+  declined: 'Refund declined',
+  approved: 'Refund approved, being sent',
+  processing: 'Refund being sent',
+  refunded: 'Refunded',
+  cancelled: 'Request withdrawn',
+};
+
+/** The refund column of one purchase: its latest request, the shop's answer, and "Ask for a refund" when that is possible. */
+function RefundCell({ license, requests, onDone }: { license: MyLicense; requests: DevRefund[]; onDone: (message: string) => Promise<void> }) {
+  const [asking, setAsking] = useState(false);
+  const [reason, setReason] = useState('');
+  const [amount, setAmount] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const latest = requests[0];
+  const open = requests.find((row) => ['requested', 'approved', 'processing'].includes(row.status));
+  const declined = requests.some((row) => row.status === 'declined');
+  const left = Math.round((Number(license.amount || 0) - Number(license.refunded_amount || 0)) * 100) / 100;
+  const canAsk = license.order_status === 'paid' && left > 0 && !open && !declined;
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      await askForRefund(license.order_id, reason.trim(), amount.trim() ? Number(amount) : null);
+      setAsking(false);
+      await onDone('Your refund request was sent to the shop. The answer appears here.');
+    } catch (submitError) {
+      setError(errorText(submitError, 'Could not send the request.'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const withdraw = async () => {
+    if (!open || !window.confirm('Withdraw your refund request?')) return;
+    setBusy(true);
+    setError('');
+    try {
+      await withdrawRefund(open.id);
+      await onDone('Your refund request was withdrawn.');
+    } catch (withdrawError) {
+      setError(errorText(withdrawError, 'Could not withdraw the request.'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      {error && <p className={styles.error} role="alert">{error}</p>}
+      {latest && (
+        <p className={styles.hint}>
+          {REFUND_STATUS[latest.status]} ({`$${Number(latest.amount).toFixed(2)}`})
+          {latest.owner_note ? `. The shop: ${latest.owner_note}` : ''}
+          {latest.status === 'refunded' && latest.payout_reference ? `. Reference: ${latest.payout_reference}` : ''}
+          {latest.status === 'approved' && license.provider === 'nowpayments' ? '. USDT is sent back by hand, so it can take a few days.' : ''}
+        </p>
+      )}
+      {open?.status === 'requested' && (
+        <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy} onClick={() => void withdraw()}>Withdraw</button>
+      )}
+      {canAsk && (asking ? (
+        <form onSubmit={submit}>
+          <label className={styles.hint} htmlFor={`why-${license.id}`}>Why do you want a refund? The shop reads this.</label>
+          <textarea id={`why-${license.id}`} className={styles.textarea} rows={3} maxLength={2000} value={reason} disabled={busy} onChange={(event) => setReason(event.target.value)} />
+          <label className={styles.hint} htmlFor={`amt-${license.id}`}>Amount (empty = all ${left.toFixed(2)})</label>
+          <input id={`amt-${license.id}`} className={styles.input} type="number" min="0.01" max={left} step="0.01" value={amount} disabled={busy} onChange={(event) => setAmount(event.target.value)} />
+          <p className={styles.hint}>A full refund ends this licence: the key stops working.</p>
+          <button type="submit" className={styles.button} disabled={busy || reason.trim().length < 10}>{busy ? 'Sending…' : 'Send'}</button>{' '}
+          <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy} onClick={() => setAsking(false)}>Cancel</button>
+        </form>
+      ) : (
+        <button type="button" className={`${styles.button} ${styles.ghost}`} onClick={() => setAsking(true)}>Ask for a refund</button>
+      ))}
     </div>
   );
 }

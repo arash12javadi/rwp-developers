@@ -14,7 +14,10 @@ import {
   HttpError, currentUser, ensureBucket, requireOwner, rpc, select,
 } from './server/supabase.mjs';
 import { publicLicenseKey, readSecret } from './server/secrets.mjs';
-import { nowPaymentsPaidOrder, stripePaidOrder, verifyNowPaymentsSignature, verifyStripeSignature, PROVIDER_LABELS } from './server/payments.mjs';
+import { nowPaymentsPaidOrder, stripePaidOrder, stripeRefunds, verifyNowPaymentsSignature, verifyStripeSignature, PROVIDER_LABELS } from './server/payments.mjs';
+import {
+  buyerRefunds, cancelRefund, decideRefund, issueRefund, markRefunded, ownerRefunds, recordStripeRefunds, requestRefund, retryRefund,
+} from './server/refunds.mjs';
 import {
   claimFree, completePaid, deleteProduct, downloadForBuyer, downloadForKey, importFromRelease, paymentStatus, readPaymentsConfig,
   releaseDomain, saveProduct, savePayments, setVersionStatus, startCheckout, uploadVersion, verifyKey, verifyStoredPackage, MAX_PACKAGE_BYTES,
@@ -145,6 +148,22 @@ const developersServer = {
       return { status: 200, body: await releaseDomain(ctx, user, isUuid(ctx.json()?.license_id, 'licence')) };
     },
 
+    // Refunds (server/refunds.mjs): the buyer asks; the owner of this shop answers (no is final) or refunds an order directly.
+    'GET my/refunds': async (ctx) => {
+      const user = await signedIn(ctx);
+      return { status: 200, body: await buyerRefunds(ctx, user) };
+    },
+
+    'POST my/refund-request': async (ctx) => {
+      const user = await signedIn(ctx);
+      return { status: 200, body: await requestRefund(ctx, user, ctx.json() || {}) };
+    },
+
+    'POST my/refund-cancel': async (ctx) => {
+      const user = await signedIn(ctx);
+      return { status: 200, body: await cancelRefund(ctx, user, ctx.json() || {}) };
+    },
+
     /* ------------------------------------------------------------------ licence check for a buyer's site */
     'GET public-key': async (ctx) => {
       if (rateLimited(ctx, 'public-key')) throw tooMany();
@@ -175,6 +194,9 @@ const developersServer = {
       }
       let event;
       try { event = JSON.parse(Buffer.from(ctx.rawBody).toString('utf8')); } catch { throw new HttpError(400, 'The event is not valid JSON.'); }
+      // A refund: ours settles its request; one made in the Stripe dashboard is recorded once.
+      const refunds = stripeRefunds(event);
+      if (refunds.length) return { status: 200, body: { received: true, refunds: await recordStripeRefunds(ctx, refunds) } };
       const paid = stripePaidOrder(event);
       if (!paid) return { status: 200, body: { received: true } };
       return webhookOutcome(async () => {
@@ -209,6 +231,31 @@ const developersServer = {
         status: 200,
         body: { ...status, max_package_mb: MAX_PACKAGE_BYTES / 1024 / 1024, snippet: status.license_public_key ? verifySnippet(status.license_public_key) : '' },
       };
+    },
+
+    'GET admin/refunds': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await ownerRefunds(ctx) };
+    },
+
+    'POST admin/refunds/decide': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await decideRefund(ctx, await signedIn(ctx), ctx.json() || {}) };
+    },
+
+    'POST admin/refunds/issue': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await issueRefund(ctx, await signedIn(ctx), ctx.json() || {}) };
+    },
+
+    'POST admin/refunds/send': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await retryRefund(ctx, await signedIn(ctx), ctx.json() || {}) };
+    },
+
+    'POST admin/refunds/mark-paid': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await markRefunded(ctx, await signedIn(ctx), ctx.json() || {}) };
     },
 
     'POST admin/payments/save': async (ctx) => {

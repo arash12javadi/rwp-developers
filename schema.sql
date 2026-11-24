@@ -81,6 +81,9 @@ create table if not exists public.dev_orders (
   created_at timestamptz not null default now(),
   paid_at timestamptz
 );
+-- How much of a paid order was given back. Written only by dev_refund_settle; a fully refunded order is `refunded`.
+alter table public.dev_orders add column if not exists refunded_amount numeric(12,2) not null default 0;
+alter table public.dev_orders add column if not exists refunded_at timestamptz;
 create index if not exists dev_orders_buyer_idx on public.dev_orders(buyer_id, created_at desc);
 create index if not exists dev_orders_product_idx on public.dev_orders(product_id);
 -- A provider's payment id can complete one order only.
@@ -321,7 +324,7 @@ begin
 end;
 $$;
 
--- The signed-in buyer's own licences, with the plugin they are for.
+-- The signed-in buyer's own licences, with the plugin they are for and the order that paid for them (for "Ask for a refund").
 create or replace function public.dev_my_licenses()
 returns jsonb language plpgsql stable security definer set search_path = public as $$
 begin
@@ -331,12 +334,305 @@ begin
   return coalesce((
     select jsonb_agg(jsonb_build_object(
       'id', l.id, 'plugin', p.slug, 'title', p.title, 'license_key', l.license_key, 'status', l.status,
-      'expires_at', l.expires_at, 'domain', l.domain, 'version', p.current_version, 'created_at', l.created_at
+      'expires_at', l.expires_at, 'domain', l.domain, 'version', p.current_version, 'created_at', l.created_at,
+      'order_id', o.id, 'order_status', o.status, 'amount', o.amount, 'currency', o.currency, 'provider', o.provider,
+      'refunded_amount', o.refunded_amount, 'paid_at', o.paid_at
     ) order by l.created_at desc)
     from public.dev_licenses l
     join public.dev_products p on p.id = l.product_id
+    join public.dev_orders o on o.id = l.order_id
     where l.user_id = auth.uid()
   ), '[]'::jsonb);
+end;
+$$;
+
+-- Refunds -----------------------------------------------------------------------------------------------------------------------
+-- This shop's owner is the seller, so a buyer asks the owner, and the owner's answer is final:
+--   requested -> approved (owner) | declined (owner, final) | cancelled (buyer withdrew)
+--   approved  -> processing (the server claimed it for the Stripe call) -> refunded, or back to approved with the error
+--   approved  -> refunded (the owner records money returned by hand: a NOWPayments/crypto payment has no refund API)
+-- The owner can also refund any paid order directly, and a refund made in the Stripe dashboard is recorded from the webhook.
+-- A full refund revokes the order's licence; a partial one only when the owner asks. Every function is service_role only: the server
+-- checks the session (buyer) or manage_options (owner) and passes the account in.
+create table if not exists public.dev_refunds (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references public.dev_orders(id) on delete restrict,
+  buyer_id uuid references auth.users(id) on delete set null,
+  amount numeric(12,2) not null check (amount > 0),
+  currency text not null default 'usd',
+  reason text not null default '' check (length(reason) <= 2000),
+  owner_note text not null default '' check (length(owner_note) <= 2000),
+  status text not null default 'requested' check (status in ('requested', 'declined', 'approved', 'processing', 'refunded', 'cancelled')),
+  origin text not null default 'buyer' check (origin in ('buyer', 'owner', 'gateway')),
+  revoke_license boolean not null default false,
+  gateway_refund_id text,
+  payout_reference text not null default '' check (length(payout_reference) <= 300),
+  error text not null default '',
+  decided_by uuid references auth.users(id) on delete set null,
+  decided_at timestamptz,
+  refunded_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists dev_refunds_buyer_idx on public.dev_refunds(buyer_id, created_at desc);
+create index if not exists dev_refunds_status_idx on public.dev_refunds(status);
+create unique index if not exists dev_refunds_open_uniq on public.dev_refunds(order_id) where status in ('requested', 'approved', 'processing');
+create unique index if not exists dev_refunds_gateway_uniq on public.dev_refunds(gateway_refund_id) where gateway_refund_id is not null;
+alter table public.dev_refunds enable row level security;
+drop trigger if exists dev_refunds_touch on public.dev_refunds;
+create trigger dev_refunds_touch before update on public.dev_refunds for each row execute function public.dev_touch();
+
+-- The buyer asks for a refund of one of their own paid orders. `p_amount` null = everything not refunded yet.
+create or replace function public.dev_refund_open(p_order uuid, p_buyer uuid, p_reason text, p_amount numeric default null)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare
+  v_order public.dev_orders%rowtype;
+  v_left numeric;
+  v_amount numeric;
+  v_row public.dev_refunds%rowtype;
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'Only the server can open a refund request.' using errcode = '42501';
+  end if;
+  select * into v_order from public.dev_orders where id = p_order for update;
+  if v_order.id is null or v_order.buyer_id is distinct from p_buyer then
+    raise exception 'That order is not yours.' using errcode = 'P0002';
+  end if;
+  if v_order.status <> 'paid' or v_order.amount <= 0 then
+    raise exception 'Only a paid order can be refunded.' using errcode = '22023';
+  end if;
+  if length(trim(coalesce(p_reason, ''))) < 10 then
+    raise exception 'Tell the shop why you want a refund (at least a sentence).' using errcode = '22023';
+  end if;
+  v_left := v_order.amount - v_order.refunded_amount;
+  v_amount := coalesce(p_amount, v_left);
+  if v_amount <= 0 or v_amount > v_left + 0.001 then
+    raise exception 'The refund must be more than 0 and at most % %.', round(v_left, 2), upper(v_order.currency) using errcode = '22023';
+  end if;
+  if exists (select 1 from public.dev_refunds where order_id = v_order.id and status in ('requested', 'approved', 'processing')) then
+    raise exception 'There is already an open refund request for this order.' using errcode = '23505';
+  end if;
+  if exists (select 1 from public.dev_refunds where order_id = v_order.id and status = 'declined') then
+    raise exception 'The shop already decided that this order is not refunded.' using errcode = '22023';
+  end if;
+  if (select count(*) from public.dev_refunds where order_id = v_order.id and origin = 'buyer') >= 5 then
+    raise exception 'This order has been asked about too many times. Contact the shop instead.' using errcode = '22023';
+  end if;
+  insert into public.dev_refunds (order_id, buyer_id, amount, currency, reason, origin)
+  values (v_order.id, v_order.buyer_id, round(v_amount, 2), v_order.currency, left(trim(p_reason), 2000), 'buyer')
+  returning * into v_row;
+  return to_jsonb(v_row);
+end;
+$$;
+
+create or replace function public.dev_refund_cancel(p_refund uuid, p_buyer uuid)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare
+  v_row public.dev_refunds%rowtype;
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'Only the server can change a refund request.' using errcode = '42501';
+  end if;
+  update public.dev_refunds set status = 'cancelled'
+   where id = p_refund and buyer_id = p_buyer and status = 'requested'
+  returning * into v_row;
+  if v_row.id is null then
+    raise exception 'That request is not yours, or it can no longer be withdrawn.' using errcode = '22023';
+  end if;
+  return to_jsonb(v_row);
+end;
+$$;
+
+-- The owner's answer to a buyer's request. "No" is final. `p_revoke` only matters for a partial refund.
+create or replace function public.dev_refund_decide(p_refund uuid, p_actor uuid, p_approve boolean, p_note text default '', p_revoke boolean default false)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare
+  v_row public.dev_refunds%rowtype;
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'Only the server can decide a refund request.' using errcode = '42501';
+  end if;
+  update public.dev_refunds
+     set status = case when p_approve then 'approved' else 'declined' end,
+         owner_note = left(coalesce(trim(p_note), ''), 2000), revoke_license = coalesce(p_revoke, false),
+         decided_by = p_actor, decided_at = now(), error = ''
+   where id = p_refund and status = 'requested'
+  returning * into v_row;
+  if v_row.id is null then
+    raise exception 'That request is not waiting for an answer.' using errcode = '22023';
+  end if;
+  return to_jsonb(v_row);
+end;
+$$;
+
+-- The owner refunds a paid order without being asked; an open request on it is answered instead of a second one being opened.
+create or replace function public.dev_refund_issue(p_order uuid, p_actor uuid, p_amount numeric, p_note text, p_revoke boolean default false)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare
+  v_order public.dev_orders%rowtype;
+  v_left numeric;
+  v_amount numeric;
+  v_row public.dev_refunds%rowtype;
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'Only the server can issue a refund.' using errcode = '42501';
+  end if;
+  select * into v_order from public.dev_orders where id = p_order for update;
+  if v_order.id is null then
+    raise exception 'That order does not exist.' using errcode = 'P0002';
+  end if;
+  if v_order.status <> 'paid' or v_order.amount <= 0 then
+    raise exception 'Only a paid order can be refunded.' using errcode = '22023';
+  end if;
+  v_left := v_order.amount - v_order.refunded_amount;
+  v_amount := coalesce(p_amount, v_left);
+  if v_amount <= 0 or v_amount > v_left + 0.001 then
+    raise exception 'The refund must be more than 0 and at most % %.', round(v_left, 2), upper(v_order.currency) using errcode = '22023';
+  end if;
+  select * into v_row from public.dev_refunds where order_id = v_order.id and status in ('requested', 'approved', 'processing') for update;
+  if v_row.id is not null then
+    if v_row.status = 'processing' then
+      raise exception 'A refund for this order is being sent right now.' using errcode = '22023';
+    end if;
+    update public.dev_refunds
+       set status = 'approved', amount = round(v_amount, 2), owner_note = left(coalesce(trim(p_note), ''), 2000),
+           revoke_license = coalesce(p_revoke, false), decided_by = p_actor, decided_at = now(), error = ''
+     where id = v_row.id
+    returning * into v_row;
+    return to_jsonb(v_row);
+  end if;
+  insert into public.dev_refunds (order_id, buyer_id, amount, currency, owner_note, status, origin, revoke_license, decided_by, decided_at)
+  values (v_order.id, v_order.buyer_id, round(v_amount, 2), v_order.currency, left(coalesce(trim(p_note), ''), 2000),
+          'approved', 'owner', coalesce(p_revoke, false), p_actor, now())
+  returning * into v_row;
+  return to_jsonb(v_row);
+end;
+$$;
+
+-- Claims an approved refund for the Stripe call, so it is never sent twice. Returns what the call needs.
+create or replace function public.dev_refund_claim(p_refund uuid)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare
+  v_row public.dev_refunds%rowtype;
+  v_order public.dev_orders%rowtype;
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'Only the server can send a refund.' using errcode = '42501';
+  end if;
+  update public.dev_refunds set status = 'processing', error = '' where id = p_refund and status = 'approved' returning * into v_row;
+  if v_row.id is null then
+    raise exception 'That refund is not approved, or it is already being sent.' using errcode = '22023';
+  end if;
+  select * into v_order from public.dev_orders where id = v_row.order_id;
+  if v_order.status <> 'paid' or v_row.amount > v_order.amount - v_order.refunded_amount + 0.001 then
+    update public.dev_refunds set status = 'approved', error = 'The order has less left to refund than this asks for.' where id = v_row.id;
+    raise exception 'The order has less left to refund than this asks for.' using errcode = '22023';
+  end if;
+  return to_jsonb(v_row) || jsonb_build_object('provider', v_order.provider, 'provider_ref', v_order.provider_ref);
+end;
+$$;
+
+create or replace function public.dev_refund_release(p_refund uuid, p_error text)
+returns void language sql volatile security definer set search_path = public as $$
+  update public.dev_refunds set status = 'approved', error = left(coalesce(p_error, ''), 1000) where id = p_refund and status = 'processing';
+$$;
+
+-- The money is back: records it on the order and revokes the licence on a full refund (or when the decision asked for it).
+-- From `processing` (the provider confirmed) or `approved` (the owner returned it by hand, with a reference). Idempotent.
+create or replace function public.dev_refund_settle(p_refund uuid, p_gateway_refund_id text default null, p_payout_reference text default '', p_actor uuid default null)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare
+  v_row public.dev_refunds%rowtype;
+  v_order public.dev_orders%rowtype;
+  v_refunded numeric;
+  v_full boolean;
+  v_revoked boolean := false;
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'Only the server can record a refund.' using errcode = '42501';
+  end if;
+  select * into v_row from public.dev_refunds where id = p_refund for update;
+  if v_row.id is null then
+    raise exception 'That refund does not exist.' using errcode = 'P0002';
+  end if;
+  if v_row.status = 'refunded' then
+    return to_jsonb(v_row) || jsonb_build_object('repeat', true);
+  end if;
+  if v_row.status not in ('processing', 'approved') then
+    raise exception 'This refund is % and cannot be recorded as paid.', v_row.status using errcode = '22023';
+  end if;
+  if v_row.status = 'approved' and nullif(trim(coalesce(p_gateway_refund_id, '')), '') is null and length(trim(coalesce(p_payout_reference, ''))) < 3 then
+    raise exception 'Say how the money was returned (a transaction hash or a short note).' using errcode = '22023';
+  end if;
+  select * into v_order from public.dev_orders where id = v_row.order_id for update;
+  v_refunded := v_order.refunded_amount + v_row.amount;
+  if v_refunded > v_order.amount + 0.001 then
+    raise exception 'This would refund more than the order was for.' using errcode = '22023';
+  end if;
+  v_full := v_refunded >= v_order.amount - 0.001;
+  update public.dev_orders
+     set refunded_amount = least(v_refunded, amount), refunded_at = now(), status = case when v_full then 'refunded' else status end
+   where id = v_order.id;
+  if v_full or v_row.revoke_license then
+    update public.dev_licenses set status = 'revoked', revoked_at = now() where order_id = v_order.id and status <> 'revoked';
+    v_revoked := found;
+  end if;
+  update public.dev_refunds
+     set status = 'refunded', refunded_at = now(), error = '',
+         gateway_refund_id = coalesce(nullif(trim(coalesce(p_gateway_refund_id, '')), ''), gateway_refund_id),
+         payout_reference = case when trim(coalesce(p_payout_reference, '')) <> '' then left(trim(p_payout_reference), 300) else payout_reference end,
+         decided_by = coalesce(decided_by, p_actor)
+   where id = v_row.id
+  returning * into v_row;
+  return to_jsonb(v_row) || jsonb_build_object('repeat', false, 'full', v_full, 'license_revoked', v_revoked);
+end;
+$$;
+
+-- A refund Stripe reports. Our own carries its refund id in the metadata and settles that refund; one made in the Stripe dashboard is
+-- recorded as a new, already refunded row. A refund id already recorded changes nothing.
+create or replace function public.dev_refund_from_gateway(p_provider_ref text, p_gateway_refund_id text, p_amount numeric, p_refund uuid default null)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare
+  v_order public.dev_orders%rowtype;
+  v_row public.dev_refunds%rowtype;
+  v_left numeric;
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'Only the server can record a refund.' using errcode = '42501';
+  end if;
+  if nullif(trim(coalesce(p_gateway_refund_id, '')), '') is null then
+    raise exception 'The provider did not name the refund.' using errcode = '22023';
+  end if;
+  if exists (select 1 from public.dev_refunds where gateway_refund_id = p_gateway_refund_id) then
+    return jsonb_build_object('recorded', false, 'skipped', 'already recorded');
+  end if;
+  if p_refund is not null then
+    select * into v_row from public.dev_refunds where id = p_refund and status in ('processing', 'approved');
+    if v_row.id is not null then
+      return public.dev_refund_settle(v_row.id, p_gateway_refund_id, '', null) || jsonb_build_object('recorded', true);
+    end if;
+  end if;
+  select * into v_order from public.dev_orders where provider = 'stripe' and provider_ref = p_provider_ref and provider_ref <> '' for update;
+  if v_order.id is null then
+    return jsonb_build_object('recorded', false, 'skipped', 'no order with that payment');
+  end if;
+  if exists (select 1 from public.dev_refunds where order_id = v_order.id and status = 'processing') then
+    return jsonb_build_object('recorded', false, 'skipped', 'a refund for this order is being recorded by the server');
+  end if;
+  if v_order.status <> 'paid' or coalesce(p_amount, 0) <= 0 then
+    return jsonb_build_object('recorded', false, 'skipped', 'the order is ' || v_order.status);
+  end if;
+  v_left := v_order.amount - v_order.refunded_amount;
+  select * into v_row from public.dev_refunds where order_id = v_order.id and status in ('requested', 'approved') for update;
+  if v_row.id is not null then
+    update public.dev_refunds set status = 'approved', amount = round(least(p_amount, v_left), 2), decided_at = coalesce(decided_at, now())
+     where id = v_row.id returning * into v_row;
+  else
+    insert into public.dev_refunds (order_id, buyer_id, amount, currency, reason, status, origin, decided_at)
+    values (v_order.id, v_order.buyer_id, round(least(p_amount, v_left), 2), v_order.currency, 'Refunded in the Stripe dashboard.', 'approved', 'gateway', now())
+    returning * into v_row;
+  end if;
+  return public.dev_refund_settle(v_row.id, p_gateway_refund_id, '', null) || jsonb_build_object('recorded', true);
 end;
 $$;
 
@@ -383,6 +679,25 @@ grant execute on function public.dev_place_order(uuid, uuid, text) to service_ro
 grant execute on function public.dev_complete_order(uuid, text, numeric, text, text, text, timestamptz) to service_role;
 grant execute on function public.dev_verify_license(text, text) to service_role;
 grant execute on function public.dev_record_version(jsonb) to service_role;
+revoke execute on function public.dev_refund_open(uuid, uuid, text, numeric) from public, anon, authenticated;
+revoke execute on function public.dev_refund_cancel(uuid, uuid) from public, anon, authenticated;
+revoke execute on function public.dev_refund_decide(uuid, uuid, boolean, text, boolean) from public, anon, authenticated;
+revoke execute on function public.dev_refund_issue(uuid, uuid, numeric, text, boolean) from public, anon, authenticated;
+revoke execute on function public.dev_refund_claim(uuid) from public, anon, authenticated;
+revoke execute on function public.dev_refund_release(uuid, text) from public, anon, authenticated;
+revoke execute on function public.dev_refund_settle(uuid, text, text, uuid) from public, anon, authenticated;
+revoke execute on function public.dev_refund_from_gateway(text, text, numeric, uuid) from public, anon, authenticated;
+grant execute on function public.dev_refund_open(uuid, uuid, text, numeric) to service_role;
+grant execute on function public.dev_refund_cancel(uuid, uuid) to service_role;
+grant execute on function public.dev_refund_decide(uuid, uuid, boolean, text, boolean) to service_role;
+grant execute on function public.dev_refund_issue(uuid, uuid, numeric, text, boolean) to service_role;
+grant execute on function public.dev_refund_claim(uuid) to service_role;
+grant execute on function public.dev_refund_release(uuid, text) to service_role;
+grant execute on function public.dev_refund_settle(uuid, text, text, uuid) to service_role;
+grant execute on function public.dev_refund_from_gateway(text, text, numeric, uuid) to service_role;
+-- Refund rows are read through the server (the buyer's own, the owner's list); no browser role reads or writes them.
+revoke all on public.dev_refunds from anon, authenticated;
+grant all on public.dev_refunds to service_role;
 -- The shop window is public on purpose (it returns published products only, never a storage path).
 grant execute on function public.dev_store_catalog() to anon, authenticated;
 -- A buyer's own licences need a session; an anonymous caller gets nothing, not even the function.

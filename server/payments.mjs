@@ -109,6 +109,50 @@ export function stripePaidOrder(event) {
   };
 }
 
+/**
+ * Refunds part or all of a Stripe payment. `paymentIntent` is the order's stored `provider_ref`; `idempotencyKey` makes a repeated
+ * request return the first answer instead of refunding twice. Returns Stripe's refund (`{ id, status, … }`).
+ */
+export async function createStripeRefund({ secretKey, paymentIntent, amount, metadata = {}, idempotencyKey, fetchImpl = fetch }) {
+  if (!/^pi_[A-Za-z0-9_]+$/.test(String(paymentIntent || ''))) {
+    throw new HttpError(409, 'This order has no Stripe payment that can be refunded from here. Refund it in the Stripe dashboard (the webhook records it), or record it with "Mark as refunded".');
+  }
+  const response = await fetchImpl('https://api.stripe.com/v1/refunds', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/x-www-form-urlencoded',
+      ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
+    },
+    body: new URLSearchParams(form({ payment_intent: paymentIntent, amount: toCents(amount), reason: 'requested_by_customer', metadata })).toString(),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new HttpError(502, `Stripe: ${payload.error?.message || `request failed with HTTP ${response.status}`}`);
+  if (['failed', 'canceled'].includes(String(payload.status || ''))) {
+    throw new HttpError(502, `Stripe reports the refund as ${payload.status}${payload.failure_reason ? ` (${payload.failure_reason})` : ''}.`);
+  }
+  return payload;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The refunds a verified Stripe event reports: `[{ ref, refundId, amount, refundRequest }]`, or [] for any other event. */
+export function stripeRefunds(event) {
+  const object = event?.data?.object;
+  if (!object) return [];
+  const one = (refund, intent) => {
+    if (!refund?.id || ['failed', 'canceled'].includes(String(refund.status || ''))) return null;
+    const ref = typeof refund.payment_intent === 'string' ? refund.payment_intent : refund.payment_intent?.id || intent || '';
+    const request = String(refund.metadata?.rwp_refund || '');
+    return { ref: String(ref), refundId: String(refund.id), amount: Number(refund.amount) / 100, refundRequest: UUID.test(request) ? request : null };
+  };
+  if (['refund.created', 'refund.updated', 'charge.refund.updated'].includes(event.type)) return [one(object)].filter(Boolean);
+  if (event.type === 'charge.refunded') {
+    const intent = typeof object.payment_intent === 'string' ? object.payment_intent : object.payment_intent?.id;
+    return (Array.isArray(object.refunds?.data) ? object.refunds.data : []).map((refund) => one(refund, intent)).filter(Boolean);
+  }
+  return [];
+}
+
 export async function createNowPaymentsInvoice({ apiKey, sandbox, payCurrency, order, title, callbackUrl, successUrl, cancelUrl, fetchImpl = fetch }) {
   const response = await fetchImpl(`${sandbox ? NOWPAYMENTS.sandbox : NOWPAYMENTS.live}/invoice`, {
     method: 'POST',

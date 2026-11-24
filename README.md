@@ -17,7 +17,7 @@ your own payment accounts**. Nothing is sent to react-wp.com, and react-wp.com i
 |---|---|
 | **Plugin Check** | Test a plugin ZIP in the browser before you install it ([details](./check/README.md)). |
 | **Your plugins** | Create plugins, import a GitHub release (the default) or upload versions (ZIP), choose which of the two rules, set a price, put them on sale. |
-| **Sales & licences** | Every order and every licence key; revoke a key, release the site it is bound to. |
+| **Sales & licences** | Every order and every licence key; revoke a key, release the site it is bound to; refunds (buyers' requests, and refunding any order). |
 | **Payments & key** | Your Stripe and NOWPayments credentials, your licence public key, your package storage. |
 | **`/store`** (and `[rwp_developer_store]`) | The public shop: what is on sale, buy or claim, "My purchases" with downloads. |
 
@@ -37,7 +37,8 @@ public GitHub repository and publish ordinary GitHub releases (see the marketpla
      the screen says so.
 3. Open **Developers → Payments & key**:
    - **Stripe:** paste the secret key and the webhook signing secret. In Stripe add a webhook endpoint at the address the
-     screen shows (`…/api/plugins/rwp-developers/webhook/stripe`) for the event `checkout.session.completed`.
+     screen shows (`…/api/plugins/rwp-developers/webhook/stripe`) for the events `checkout.session.completed`,
+     `refund.created`, `refund.updated` and `charge.refunded` (the last three record refunds made in the Stripe dashboard).
    - **NOWPayments (USDT):** paste the API key and the IPN secret; set the IPN callback to the address shown. Use the sandbox
      switch while you test.
    - Switch the methods on and save. Credentials are sealed on the server and are never shown again; the screen only says
@@ -61,9 +62,6 @@ public GitHub repository and publish ordinary GitHub releases (see the marketpla
    something to read".
 3. Set the **price** (0 = free), optionally how many **days a licence lasts** (empty = lifetime), and set the plugin **On sale**.
    A plugin with no published version cannot be put on sale.
-   **Submit to marketplace** (on a plugin linked to a GitHub repository) opens react-wp.com's `/plugins/submit` page in a
-   new tab with the repository filled in. Nothing is sent from your site; you confirm on that page (react-wp.com account
-   needed). The marketplace scans the release and passes it to the marketplace owner; it goes live only after approval.
 4. Your shop is at **`/store`**, or put `[rwp_developer_store title="Plugins"]` on any page.
 
 A buyer signs in, pays (or claims a free plugin), and finds their **licence key** and a **Download** button under *My
@@ -71,7 +69,27 @@ purchases*. They install the ZIP under *Plugins → Upload* and enter the key wh
 
 ### Your marketplace plugins are listed here too
 
-When the Marketplace plugin is installed on the same Supabase project, every plugin whose author is the site owner (an administrator or super admin) is **mirrored** into *Developers → Your plugins* with a **Marketplace** badge, each time the list opens. **The Marketplace rules them**: title, price, status, version and GitHub release are changed in *Marketplace → Inventory → Manage* and are rewritten here at the next sync; a mirrored plugin cannot be edited, uploaded to, checked or deleted here, and this shop never sells it (the Marketplace does, with its own licences). A plugin of this shop with the same id as one of the owner's marketplace plugins is adopted (the Marketplace wins); one removed from the Marketplace is archived here, never deleted. On a developer's own site, without the Marketplace, nothing is mirrored. Re-apply `schema.sql` after updating (two new columns, `managed_by` and `marketplace_plugin_id`, and the public catalogue and order functions now skip mirrored rows). Plugins created only in this shop are not copied into the Marketplace: publish them there with *Submit to marketplace*.
+When the Marketplace plugin is installed on the same Supabase project, every plugin whose author is the site owner (an administrator or super admin) is **mirrored** into *Developers → Your plugins* with a **Marketplace** badge, each time the list opens. **The Marketplace rules them**: title, price, status, version and GitHub release are changed in *Marketplace → Inventory → Manage* and are rewritten here at the next sync; a mirrored plugin cannot be edited, uploaded to, checked or deleted here, and this shop never sells it (the Marketplace does, with its own licences). A plugin of this shop with the same id as one of the owner's marketplace plugins is adopted (the Marketplace wins); one removed from the Marketplace is archived here, never deleted. On a developer's own site, without the Marketplace, nothing is mirrored. Re-apply `schema.sql` after updating (two new columns, `managed_by` and `marketplace_plugin_id`, and the public catalogue and order functions now skip mirrored rows). Plugins created only in this shop are not copied into the Marketplace.
+
+### Refunds
+
+You are the seller, so you decide, and your answer is final.
+
+- **A buyer asks** from *My purchases* on `/store` (**Ask for a refund**: a reason, and optionally a smaller amount). They can withdraw
+  it while it waits. You see it under **Sales & licences → Refunds**.
+- **You answer:** *Approve refund* or *Decline (final)* with a reason the buyer reads. A declined order cannot be asked about again.
+- **You refund without being asked:** **Refund…** on a paid order in **Sales & licences → Orders** (all, or part of it).
+- **Card (Stripe):** approving refunds it through your own Stripe account at once. It is claimed in the database first and sent with an
+  idempotency key, so a double click never refunds twice; if Stripe refuses, it stays *approved* with Stripe's reason and you can try
+  again. Add the events `refund.created`, `refund.updated` and `charge.refunded` to your Stripe webhook: a refund you make in the
+  Stripe dashboard is then recorded here once.
+- **USDT (NOWPayments):** NOWPayments has no refund API. Send the USDT back from your wallet, then press **Mark as refunded** with the
+  transaction hash.
+- A **full** refund revokes the licence (its key stops verifying and downloading) and marks the order `refunded`; a partial refund keeps
+  the licence unless you tick *Also revoke the licence*. After a refund the buyer can buy the plugin again. *Sales & licences* shows the
+  total after refunds.
+- The buyer is **not emailed** about refunds (this plugin sends no email); they see the answer on `/store`. Tell them yourself if you
+  want them to know sooner.
 
 ### Checking a licence in your own plugin
 
@@ -89,7 +107,9 @@ The first successful `verify` binds the key to that site; another site is refuse
 
 ## For the people who buy from you (Client)
 
-Nothing to set up. Sign in on your shop, buy or claim, download from *My purchases*, upload the ZIP, enter the key.
+Nothing to set up. Sign in on your shop, buy or claim, download from *My purchases*, upload the ZIP, enter the key. To get your
+money back, press **Ask for a refund** on the purchase and say why; the shop's answer appears on the same page. A full refund ends
+the licence.
 
 ## How it is protected
 
@@ -116,7 +136,8 @@ Nothing to set up. Sign in on your shop, buy or claim, download from *My purchas
 - **Not run against live Stripe, NOWPayments, Supabase or Vercel yet.** The server logic, the SQL (in a real Postgres), and the
   signature checks are tested; a first real payment in test mode is the remaining proof. Use Stripe's test keys and the
   NOWPayments sandbox first.
-- **No refunds or chargebacks in the shop.** Refund in Stripe/NOWPayments, then **Revoke** the licence here.
+- **Refunds are built in (see *Refunds*); chargebacks are not.** A card dispute is handled in Stripe; revoke the licence here yourself.
+  USDT refunds are sent by hand (no NOWPayments refund API).
 - **Taxes, invoices and payouts are yours**: this plugin records orders, it does not file anything for you.
 - **Upload size:** a Vercel function accepts about 4.5 MB per request, so a larger ZIP has to come from a **GitHub release**
   (the server downloads it, up to 40 MB). A self-hosted `npm start` site has no such limit below 40 MB.
@@ -127,7 +148,10 @@ Nothing to set up. Sign in on your shop, buy or claim, download from *My purchas
 
 ## For maintainers
 
-- `schema.sql` / `uninstall.sql`: `dev_products`, `dev_versions`, `dev_orders`, `dev_licenses`, `dev_settings`, `dev_secrets`.
+- `schema.sql` / `uninstall.sql`: `dev_products`, `dev_versions`, `dev_orders`, `dev_licenses`, `dev_refunds`, `dev_settings`, `dev_secrets`.
+  Refunds: `dev_refund_open` / `_cancel` / `_decide` / `_issue` / `_claim` / `_release` / `_settle` / `_from_gateway`, all
+  service-role only (`server/refunds.mjs` checks the session or `manage_options` first); `dev_refunds` has RLS on, no policy, and no
+  browser grants.
   The schema is safe to re-run. If Payments & keys or the GitHub release import shows
   `permission denied for table dev_settings` (HTTP 403), re-run `schema.sql` in the Supabase SQL editor: it grants
   `service_role` access to the `dev_*` tables.

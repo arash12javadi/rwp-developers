@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { clearLicenseDomain, listLicenses, listOrders, setLicenseStatus } from '../lib/api';
 import type { DevLicense, DevOrder } from '../lib/types';
+import RefundsPanel, { OrderRefundForm } from './RefundsPanel';
 import styles from '../developers.module.css';
 
 const errorText = (error: unknown, fallback: string) => (error instanceof Error && error.message ? error.message : fallback);
@@ -9,7 +10,8 @@ const PROVIDERS: Record<string, string> = { stripe: 'Stripe', nowpayments: 'NOWP
 
 /** Developers → Sales: every order, and every licence with the two things an owner may do to one. */
 export default function SalesAdmin() {
-  const [tab, setTab] = useState<'orders' | 'licenses'>('orders');
+  const [tab, setTab] = useState<'orders' | 'licenses' | 'refunds'>('orders');
+  const [refunding, setRefunding] = useState('');
   const [orders, setOrders] = useState<DevOrder[] | null>(null);
   const [licenses, setLicenses] = useState<DevLicense[] | null>(null);
   const [busy, setBusy] = useState('');
@@ -37,35 +39,46 @@ export default function SalesAdmin() {
     }
   };
 
-  const revenue = (orders || []).filter((order) => order.status === 'paid').reduce((sum, order) => sum + Number(order.amount), 0);
+  // Net of refunds: a fully refunded order adds nothing, a partly refunded one what was kept.
+  const kept = (orders || []).filter((order) => order.status === 'paid' || order.status === 'refunded');
+  const revenue = kept.reduce((sum, order) => sum + Number(order.amount) - Number(order.refunded_amount || 0), 0);
+  const refunded = kept.reduce((sum, order) => sum + Number(order.refunded_amount || 0), 0);
   const paidCount = (orders || []).filter((order) => order.status === 'paid').length;
 
   return (
     <div className={styles.wrap}>
       <h2 className={styles.title}>Sales &amp; licences</h2>
       <p className={styles.subtitle}>
-        {paidCount} paid order{paidCount === 1 ? '' : 's'}, ${revenue.toFixed(2)} in total. Money goes straight to your own Stripe or NOWPayments account;
-        this list is your record of it.
+        {paidCount} paid order{paidCount === 1 ? '' : 's'}, ${revenue.toFixed(2)} in total after ${refunded.toFixed(2)} of refunds. Money goes straight to
+        your own Stripe or NOWPayments account; this list is your record of it.
       </p>
       {error && <p className={styles.error} role="alert">{error}</p>}
       {message && <p className={styles.notice} role="status">{message}</p>}
       <div className={styles.tabs}>
         <button type="button" className={tab === 'orders' ? styles.button : `${styles.button} ${styles.ghost}`} onClick={() => setTab('orders')}>Orders</button>
         <button type="button" className={tab === 'licenses' ? styles.button : `${styles.button} ${styles.ghost}`} onClick={() => setTab('licenses')}>Licences</button>
+        <button type="button" className={tab === 'refunds' ? styles.button : `${styles.button} ${styles.ghost}`} onClick={() => setTab('refunds')}>Refunds</button>
       </div>
+
+      {tab === 'refunds' && <RefundsPanel onChanged={load} />}
 
       {tab === 'orders' && (!orders ? <p className={styles.muted}>Loading…</p> : !orders.length ? <p className={styles.hint}>No orders yet.</p> : (
         <div className={styles.panel}><div className={styles.tableWrap}>
           <table className={styles.table}>
-            <thead><tr><th>Date</th><th>Plugin</th><th>Method</th><th>Amount</th><th>Status</th></tr></thead>
+            <thead><tr><th>Date</th><th>Plugin</th><th>Method</th><th>Amount</th><th>Status</th><th /></tr></thead>
             <tbody>
               {orders.map((order) => (
                 <tr key={order.id}>
                   <td>{when(order.paid_at || order.created_at)}</td>
                   <td>{order.dev_products?.title || '—'}</td>
                   <td>{PROVIDERS[order.provider] || order.provider}</td>
-                  <td>${Number(order.amount).toFixed(2)}</td>
+                  <td>${Number(order.amount).toFixed(2)}{Number(order.refunded_amount || 0) > 0 ? <><br /><span className={styles.muted}>${Number(order.refunded_amount).toFixed(2)} refunded</span></> : null}</td>
                   <td><span className={`${styles.badge} ${styles[order.status]}`}>{order.status}</span></td>
+                  <td>
+                    {order.status === 'paid' && Number(order.amount) - Number(order.refunded_amount || 0) > 0 && (refunding === order.id
+                      ? <OrderRefundForm order={order} onClose={() => setRefunding('')} onDone={(text) => { setMessage(text); load(); }} />
+                      : <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy !== ''} onClick={() => setRefunding(order.id)}>Refund…</button>)}
+                  </td>
                 </tr>
               ))}
             </tbody>

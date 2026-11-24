@@ -1,6 +1,7 @@
 import { describeDbError, getSupabaseClient } from '../../../src/lib/db';
 import type {
-  DevLicense, DevOrder, DevProduct, DevVersion, ImportResult, MyLicense, PaymentSettingsInput, PaymentStatus, StoreCatalog, UploadResult,
+  DevLicense, DevOrder, DevProduct, DevRefund, DevRefundResult, DevVersion, ImportResult, MyLicense, PaymentSettingsInput, PaymentStatus,
+  StoreCatalog, UploadResult,
 } from './types';
 
 const ROUTES = '/api/plugins/rwp-developers';
@@ -43,6 +44,21 @@ export const startCheckout = (productId: string, provider: string) => post<{ url
 export const myLicenses = () => get<{ licenses: MyLicense[] }>('my/licenses').then((answer) => answer.licenses);
 export const downloadMine = (licenseId: string) => post<{ download_url: string; version: string; sha256: string }>('my/download', { license_id: licenseId });
 export const releaseMyDomain = (licenseId: string) => post<{ released: boolean }>('my/release-domain', { license_id: licenseId });
+/** Refunds, the buyer's side: ask the shop's owner (their answer is final), see the answer, withdraw while it waits. */
+export const myRefunds = () => get<{ refunds: DevRefund[] }>('my/refunds').then((answer) => answer.refunds);
+export const askForRefund = (orderId: string, reason: string, amount?: number | null) =>
+  post<{ refund: DevRefund }>('my/refund-request', { order_id: orderId, reason, ...(amount ? { amount } : {}) });
+export const withdrawRefund = (refundId: string) => post<{ refund: DevRefund }>('my/refund-cancel', { refund_id: refundId });
+
+/** Refunds, the owner's side. A Stripe refund is sent on approval; a NOWPayments (USDT) refund is sent by hand and then recorded. */
+export const ownerRefunds = () => get<{ refunds: DevRefund[] }>('admin/refunds').then((answer) => answer.refunds);
+export const decideRefund = (refundId: string, approve: boolean, note: string, revoke = false) =>
+  post<DevRefundResult>('admin/refunds/decide', { refund_id: refundId, approve, note, revoke });
+export const issueRefund = (input: { order_id: string; amount?: number | null; note: string; revoke: boolean; manual: boolean; payout_reference?: string }) =>
+  post<DevRefundResult>('admin/refunds/issue', input);
+export const retryRefund = (refundId: string) => post<DevRefundResult>('admin/refunds/send', { refund_id: refundId });
+export const markRefundPaid = (refundId: string, payoutReference: string) =>
+  post<DevRefundResult>('admin/refunds/mark-paid', { refund_id: refundId, payout_reference: payoutReference });
 
 /* -------------------------------------------------------------------------------------------- the owner */
 export const adminStatus = () => get<PaymentStatus>('admin/status');
@@ -77,7 +93,7 @@ export const listProducts = async () => must<DevProduct[]>(await getSupabaseClie
 export const listVersions = async (productId: string) =>
   must<DevVersion[]>(await getSupabaseClient().from('dev_versions').select('*').eq('product_id', productId).order('created_at', { ascending: false }));
 export const listOrders = async () =>
-  must<DevOrder[]>(await getSupabaseClient().from('dev_orders').select('id,product_id,buyer_id,provider,amount,currency,status,created_at,paid_at,dev_products(title,slug)').order('created_at', { ascending: false }).limit(200));
+  must<DevOrder[]>(await getSupabaseClient().from('dev_orders').select('id,product_id,buyer_id,provider,amount,currency,status,created_at,paid_at,refunded_amount,dev_products(title,slug)').order('created_at', { ascending: false }).limit(200));
 export const listLicenses = async () =>
   must<DevLicense[]>(await getSupabaseClient().from('dev_licenses').select('id,product_id,user_id,serial,status,expires_at,domain,created_at,dev_products(title,slug)').order('created_at', { ascending: false }).limit(200));
 

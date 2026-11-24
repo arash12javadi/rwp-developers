@@ -8,10 +8,10 @@
   "database": {
     "schema": "./schema.sql",
     "uninstall": "./uninstall.sql",
-    "tables": ["dev_products", "dev_versions", "dev_orders", "dev_licenses", "dev_settings", "dev_secrets"],
+    "tables": ["dev_products", "dev_versions", "dev_orders", "dev_licenses", "dev_refunds", "dev_settings", "dev_secrets"],
     "functions": [
       "dev_store_catalog", "dev_place_order", "dev_complete_order", "dev_verify_license", "dev_my_licenses",
-      "dev_record_version"
+      "dev_record_version", "dev_refund_open", "dev_refund_decide", "dev_refund_settle", "dev_refund_from_gateway"
     ],
     "retains": [
       "Plugin packages uploaded to Supabase Storage (bucket rwp-developer-packages) are not deleted; remove the bucket in the Supabase dashboard if you want the files gone.",

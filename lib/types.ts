@@ -50,6 +50,7 @@ export interface DevOrder {
   status: 'pending' | 'paid' | 'failed' | 'refunded';
   created_at: string;
   paid_at: string | null;
+  refunded_amount?: number;
   dev_products?: { title: string; slug: string } | null;
 }
 
@@ -90,7 +91,44 @@ export interface MyLicense {
   domain: string | null;
   version: string;
   created_at: string;
+  /** The order that paid for it, so a buyer can ask for a refund of it. */
+  order_id: string;
+  order_status: DevOrder['status'];
+  amount: number;
+  currency: string;
+  provider: DevOrder['provider'];
+  refunded_amount: number;
+  paid_at: string | null;
 }
+
+/** requested -> approved | declined (final) | cancelled; approved -> processing -> refunded (or back to approved with the error). */
+export type DevRefundStatus = 'requested' | 'declined' | 'approved' | 'processing' | 'refunded' | 'cancelled';
+
+export interface DevRefund {
+  id: string;
+  order_id: string;
+  amount: number;
+  currency: string;
+  reason: string;
+  owner_note: string;
+  status: DevRefundStatus;
+  origin: 'buyer' | 'owner' | 'gateway';
+  revoke_license: boolean;
+  gateway_refund_id: string | null;
+  payout_reference: string;
+  error: string;
+  decided_at: string | null;
+  refunded_at: string | null;
+  created_at: string;
+  updated_at: string;
+  /** The owner's list only. */
+  order?: { id: string; product_id: string; provider: DevOrder['provider']; amount: number; refunded_amount: number; currency: string; created_at: string } | null;
+  product?: { id: string; title: string; slug: string } | null;
+  buyer_name?: string;
+  refund_method?: 'stripe' | 'manual';
+}
+
+export interface DevRefundResult { refund: DevRefund; sent: boolean; method?: 'stripe' | 'manual'; refund_id?: string; message?: string }
 
 export interface ProviderCheck { enabled: boolean; missing: string[]; ready: boolean }
 export interface PaymentStatus {

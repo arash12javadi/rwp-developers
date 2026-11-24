@@ -1,0 +1,198 @@
+import { useEffect, useState, type FormEvent } from 'react';
+import { decideRefund, issueRefund, markRefundPaid, ownerRefunds, retryRefund } from '../lib/api';
+import type { DevOrder, DevRefund, DevRefundStatus } from '../lib/types';
+import styles from '../developers.module.css';
+
+/**
+ * Developers → Sales & licences → Refunds. Buyers ask from "My purchases" on the store; you are the seller, so your answer is final.
+ * A Stripe payment is refunded through Stripe the moment you approve; a NOWPayments (USDT) payment has no refund API, so you send it
+ * back from your wallet and record it here. A full refund always revokes the licence.
+ */
+
+const errorText = (error: unknown, fallback: string) => (error instanceof Error && error.message ? error.message : fallback);
+const when = (value: string | null | undefined) => (value ? new Date(value).toLocaleString() : '—');
+const usd = (value: number) => `$${Number(value || 0).toFixed(2)}`;
+
+const LABEL: Record<DevRefundStatus, string> = {
+  requested: 'Waiting for you', declined: 'Declined', approved: 'Approved, not sent', processing: 'Being sent',
+  refunded: 'Refunded', cancelled: 'Withdrawn',
+};
+
+export default function RefundsPanel({ onChanged }: { onChanged: () => void }) {
+  const [rows, setRows] = useState<DevRefund[] | null>(null);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [reload, setReload] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    ownerRefunds()
+      .then((list) => { if (live) { setRows(list); setError(''); } })
+      .catch((loadError: unknown) => { if (live) { setRows([]); setError(errorText(loadError, 'Could not load the refunds.')); } });
+    return () => { live = false; };
+  }, [reload]);
+
+  const done = (text: string) => {
+    setMessage(text);
+    setReload((value) => value + 1);
+    onChanged();
+  };
+
+  return (
+    <div>
+      <p className={styles.hint}>
+        Buyers ask for a refund from <strong>My purchases</strong> on your store. Your answer is final. Approving a card payment refunds it
+        through your Stripe account straight away; a USDT payment is sent back by you from your wallet and then recorded here. To refund an
+        order nobody asked about, use <strong>Refund…</strong> on the Orders tab.
+      </p>
+      {error && <p className={styles.error} role="alert">{error}</p>}
+      {message && <p className={styles.notice} role="status">{message}</p>}
+      {!rows ? <p className={styles.muted}>Loading…</p> : !rows.length ? <p className={styles.hint}>No refund requests yet.</p> : (
+        rows.map((row) => <RefundRow key={row.id} row={row} onDone={done} />)
+      )}
+    </div>
+  );
+}
+
+function RefundRow({ row, onDone }: { row: DevRefund; onDone: (message: string) => void }) {
+  const [note, setNote] = useState('');
+  const [revoke, setRevoke] = useState(false);
+  const [reference, setReference] = useState('');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const order = row.order;
+  const partial = order ? Number(row.amount) < Number(order.amount) - Number(order.refunded_amount || 0) - 0.001 : false;
+
+  const run = async (name: string, action: () => Promise<string>) => {
+    setBusy(name);
+    setError('');
+    try { onDone(await action()); } catch (actionError) { setError(errorText(actionError, 'That did not work.')); } finally { setBusy(''); }
+  };
+
+  const decide = (approve: boolean) => {
+    if (!approve && note.trim().length < 5) { setError('Say why you decline: the buyer reads it, and it is final.'); return; }
+    const confirmText = approve
+      ? `Refund ${usd(row.amount)}? ${row.refund_method === 'stripe' ? 'The card is refunded through Stripe now.' : 'You send the USDT back by hand, then record it here.'}`
+      : 'Decline this refund? It is final: the buyer cannot ask again for this order.';
+    if (!window.confirm(confirmText)) return;
+    void run(approve ? 'approve' : 'decline', async () => {
+      const result = await decideRefund(row.id, approve, note.trim(), revoke);
+      if (!approve) return 'Declined.';
+      return result.sent ? `Refunded ${usd(row.amount)} through Stripe.` : (result.message || 'Approved.');
+    });
+  };
+
+  const markPaid = (event: FormEvent) => {
+    event.preventDefault();
+    void run('paid', async () => { await markRefundPaid(row.id, reference.trim()); return 'Recorded as refunded.'; });
+  };
+
+  return (
+    <div className={styles.panel}>
+      <h3 className={styles.panelTitle}>
+        {row.product?.title || 'Plugin'} · {usd(row.amount)} · {row.buyer_name || '—'}{' '}
+        <span className={`${styles.badge} ${styles[row.status === 'refunded' ? 'paid' : row.status === 'declined' ? 'revoked' : 'pending'] || ''}`}>{LABEL[row.status]}</span>
+      </h3>
+      <p className={styles.hint}>
+        {row.origin === 'owner' ? 'Issued by you' : row.origin === 'gateway' ? 'Made in the Stripe dashboard' : 'Asked by the buyer'} on {when(row.created_at)}
+        {' · '}{row.refund_method === 'stripe' ? 'Card (Stripe)' : 'USDT (NOWPayments): sent by hand'}
+        {order ? ` · order ${usd(order.amount)} on ${when(order.created_at)}` : ''}
+      </p>
+      {row.reason && <p><strong>Buyer:</strong> {row.reason}</p>}
+      {row.owner_note && <p><strong>You:</strong> {row.owner_note}</p>}
+      {row.payout_reference && <p className={styles.hint}>Payout reference: {row.payout_reference}</p>}
+      {row.gateway_refund_id && <p className={styles.hint}>Stripe refund: <code>{row.gateway_refund_id}</code></p>}
+      {row.error && <p className={styles.error}>Last attempt: {row.error}</p>}
+      {error && <p className={styles.error} role="alert">{error}</p>}
+
+      {row.status === 'requested' && (
+        <div className={styles.field}>
+          <label htmlFor={`n-${row.id}`}>Your answer (the buyer reads it; required to decline)</label>
+          <textarea id={`n-${row.id}`} className={styles.textarea} rows={2} maxLength={2000} value={note} disabled={busy !== ''} onChange={(event) => setNote(event.target.value)} />
+          {partial && (
+            <label><input type="checkbox" checked={revoke} disabled={busy !== ''} onChange={(event) => setRevoke(event.target.checked)} /> Also revoke the licence (a full refund always does)</label>
+          )}
+          <div className={styles.row}>
+            <button type="button" className={styles.button} disabled={busy !== ''} onClick={() => decide(true)}>{busy === 'approve' ? 'Refunding…' : 'Approve refund'}</button>
+            <button type="button" className={`${styles.button} ${styles.danger}`} disabled={busy !== ''} onClick={() => decide(false)}>{busy === 'decline' ? 'Saving…' : 'Decline (final)'}</button>
+          </div>
+        </div>
+      )}
+
+      {row.status === 'approved' && row.refund_method === 'stripe' && (
+        <button type="button" className={styles.button} disabled={busy !== ''} onClick={() => void run('send', async () => { await retryRefund(row.id); return `Refunded ${usd(row.amount)} through Stripe.`; })}>
+          {busy === 'send' ? 'Sending…' : 'Send the refund through Stripe'}
+        </button>
+      )}
+
+      {row.status === 'approved' && (
+        <form className={styles.row} onSubmit={markPaid}>
+          <div className={styles.field} style={{ flex: '1 1 260px' }}>
+            <label htmlFor={`r-${row.id}`}>{row.refund_method === 'stripe' ? 'Refunded it in the Stripe dashboard instead? Its refund id' : 'After you sent it: the transaction hash'}</label>
+            <input id={`r-${row.id}`} className={styles.input} maxLength={300} value={reference} disabled={busy !== ''} onChange={(event) => setReference(event.target.value)} />
+          </div>
+          <button type="submit" className={`${styles.button} ${styles.ghost}`} disabled={busy !== '' || reference.trim().length < 3}>{busy === 'paid' ? 'Saving…' : 'Mark as refunded'}</button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/** "Refund…" on one paid order of the Orders tab: the owner refunds it without a request (or records one made elsewhere). */
+export function OrderRefundForm({ order, onClose, onDone }: { order: DevOrder; onClose: () => void; onDone: (message: string) => void }) {
+  const left = Math.round((Number(order.amount) - Number(order.refunded_amount || 0)) * 100) / 100;
+  const [amount, setAmount] = useState('');
+  const [note, setNote] = useState('');
+  const [revoke, setRevoke] = useState(false);
+  const [manual, setManual] = useState(order.provider !== 'stripe');
+  const [reference, setReference] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const value = amount.trim() ? Number(amount) : left;
+  const full = value >= left - 0.001;
+  const record = manual && reference.trim().length >= 3;
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const how = record ? 'Record a refund already paid back' : order.provider === 'stripe' ? 'Refund the card through Stripe now' : 'Approve it (you send the USDT by hand, then record it)';
+    if (!window.confirm(`${how}: ${usd(value)}?${full ? ' The licence is revoked.' : ''}`)) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await issueRefund({
+        order_id: order.id, amount: amount.trim() ? Number(amount) : null, note: note.trim(), revoke, manual: record,
+        payout_reference: record ? reference.trim() : undefined,
+      });
+      onClose();
+      onDone(result.sent ? `Refunded ${usd(value)}.` : (result.message || 'Approved. Send it by hand, then mark it as refunded under Refunds.'));
+    } catch (submitError) {
+      setError(errorText(submitError, 'Could not refund this order.'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className={styles.field} style={{ minWidth: 240 }}>
+      {error && <p className={styles.error} role="alert">{error}</p>}
+      <label htmlFor={`a-${order.id}`}>Amount (empty = all {usd(left)})</label>
+      <input id={`a-${order.id}`} className={styles.input} type="number" min="0.01" max={left} step="0.01" value={amount} disabled={busy} onChange={(event) => setAmount(event.target.value)} />
+      <label htmlFor={`w-${order.id}`}>Note to the buyer</label>
+      <input id={`w-${order.id}`} className={styles.input} maxLength={2000} value={note} disabled={busy} onChange={(event) => setNote(event.target.value)} />
+      {!full && <label><input type="checkbox" checked={revoke} disabled={busy} onChange={(event) => setRevoke(event.target.checked)} /> Also revoke the licence</label>}
+      {order.provider === 'stripe' && <label><input type="checkbox" checked={manual} disabled={busy} onChange={(event) => setManual(event.target.checked)} /> Already refunded elsewhere: only record it</label>}
+      {manual && (
+        <>
+          <label htmlFor={`p-${order.id}`}>How it was paid back (transaction hash, Stripe refund id, a note)</label>
+          <input id={`p-${order.id}`} className={styles.input} maxLength={300} value={reference} disabled={busy} onChange={(event) => setReference(event.target.value)} />
+        </>
+      )}
+      <div className={styles.row}>
+        <button type="submit" className={styles.button} disabled={busy || (manual && order.provider === 'stripe' && !record)}>
+          {busy ? 'Working…' : record ? 'Record refund' : order.provider === 'stripe' ? 'Refund through Stripe' : 'Approve, send by hand later'}
+        </button>
+        <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy} onClick={onClose}>Cancel</button>
+      </div>
+    </form>
+  );
+}
