@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ComponentType, type FormEvent } from 'react';
+import { applyFilters } from '../../../src/core/hooks';
 import {
   deleteProduct, importRelease, listProducts, listVersions, saveProduct, setVersionStatus, syncMarketplace, uploadVersion, verifyStored,
 } from '../lib/api';
@@ -10,6 +11,8 @@ const SIX_HOURS =6 * 60 * 60 * 1000;
 const errorText = (error: unknown, fallback: string) => (error instanceof Error && error.message ? error.message : fallback);
 const when = (value: string | null) => (value ? new Date(value).toLocaleString() : '—');
 const price = (value: number) => (Number(value) > 0 ? `$${Number(value).toFixed(2)}` : 'Free');
+/** What the marketplace's `rwp_developers_marketplace_manage` component takes (rwp-plugin-marketplace/admin/DeveloperManage.tsx). */
+interface MarketplaceManageProps { pluginId?: string | null; slug: string; onClose: () => void; onChanged: () => void }
 const sizeLabel = (bytes: number) => (bytes > 0 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : '—');
 
 function Findings({ report }: { report?: VetReportShape }) {
@@ -175,7 +178,7 @@ function VersionsPanel({ product, onChanged }: { product: DevProduct; onChanged:
 }
 
 /** One plugin: its details, its GitHub link, and its versions. */
-function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; onChanged: () => void; onDeleted: () => void }) {
+function ProductPanel({ product, onChanged, onDeleted, onClose }: { product: DevProduct; onChanged: () => void; onDeleted: () => void; onClose: () => void }) {
   const [title, setTitle] = useState(product.title);
   const [description, setDescription] = useState(product.description);
   const [category, setCategory] = useState(product.category);
@@ -239,6 +242,11 @@ function ProductPanel({ product, onChanged, onDeleted }: { product: DevProduct; 
   };
 
   if (product.managed_by === 'marketplace') {
+    // With the marketplace active, Manage opens its Inventory dialog (without the owner's decisions); otherwise a read-only summary.
+    const MarketplaceManage = applyFilters<ComponentType<MarketplaceManageProps> | null>('rwp_developers_marketplace_manage', null);
+    if (MarketplaceManage) {
+      return <MarketplaceManage pluginId={product.marketplace_plugin_id} slug={product.slug} onClose={onClose} onChanged={onChanged} />;
+    }
     return (
       <div className={styles.panel}>
         <h3 className={styles.panelTitle}>{product.title} <span className={styles.muted}>({product.slug})</span></h3>
@@ -499,7 +507,7 @@ export default function ProductsAdmin() {
         </div>
       )}
 
-      {open && <ProductPanel key={open.id} product={open} onChanged={load} onDeleted={() => { setOpenId(''); setMessage('The plugin was deleted.'); load(); }} />}
+      {open && <ProductPanel key={open.id} product={open} onChanged={load} onClose={() => setOpenId('')} onDeleted={() => { setOpenId(''); setMessage('The plugin was deleted.'); load(); }} />}
     </div>
   );
 }

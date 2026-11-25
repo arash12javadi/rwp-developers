@@ -20,6 +20,8 @@ export interface DevProduct {
   source_error: string;
   /** 'marketplace' = a mirror of one of the owner's marketplace plugins: the marketplace rules it, so it is read-only here. */
   managed_by?: '' | 'marketplace';
+  /** The marketplace listing a mirror row copies (null on a plugin of this shop). */
+  marketplace_plugin_id?: string | null;
   created_at: string;
 }
 
