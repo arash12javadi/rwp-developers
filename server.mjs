@@ -2,7 +2,8 @@
  * Server routes for rwp-developers, served at /api/plugins/rwp-developers/<route> by server.mjs (self-hosted) and
  * api/plugins.ts (Vercel). Registered in server/plugins.mjs.
  *
- * The plugin is the developer's own shop. It never calls react-wp.com: packages live in the developer's Supabase Storage
+ * The plugin is the developer's own shop. It calls react-wp.com only when the owner sends a plugin to the React-WP marketplace
+ * (`admin/listing/*`, server/listing.mjs, over the site's account link; automatic updates after that): packages live in the developer's Supabase Storage
  * (a private bucket), orders and licences in the developer's database, money goes to the developer's Stripe or
  * NOWPayments account, and licence keys are signed with a key pair the developer's site generates.
  *
@@ -13,17 +14,18 @@
 import {
   HttpError, currentUser, ensureBucket, requireOwner, rpc, select,
 } from './server/supabase.mjs';
-import { publicLicenseKey, readSecret } from './server/secrets.mjs';
-import { nowPaymentsPaidOrder, stripePaidOrder, stripeRefunds, verifyNowPaymentsSignature, verifyStripeSignature, PROVIDER_LABELS } from './server/payments.mjs';
+import { publicLicenseKey, readSecret, storedSecretNames } from './server/secrets.mjs';
+import { gatewayChecks, nowPaymentsPaidOrder, stripePaidOrder, stripeRefunds, verifyNowPaymentsSignature, verifyStripeSignature } from './server/payments.mjs';
 import {
   buyerRefunds, cancelRefund, decideRefund, issueRefund, markRefunded, ownerRefunds, recordStripeRefunds, requestRefund, retryRefund,
 } from './server/refunds.mjs';
 import {
-  claimFree, completePaid, deleteProduct, downloadForBuyer, downloadForKey, importFromRelease, paymentStatus, readPaymentsConfig,
+  applyGatewayWebhook, claimFree, completePaid, confirmReturn, deleteProduct, downloadForBuyer, downloadForKey, importFromRelease, paymentStatus, readPaymentsConfig,
   releaseDomain, saveProduct, savePayments, setVersionStatus, startCheckout, uploadVersion, verifyKey, verifyStoredPackage, MAX_PACKAGE_BYTES,
 } from './server/store.mjs';
 import { verifySnippet } from './server/license.mjs';
 import { refuseManaged, syncMarketplaceMirror } from './server/marketplaceMirror.mjs';
+import { autoSendListing, listingOverview, sendToMarketplace, stopListing } from './server/listing.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const enc = encodeURIComponent;
@@ -112,10 +114,15 @@ const developersServer = {
     /* ----------------------------------------------------------------------------------------- the store */
     'GET store/catalog': async (ctx) => {
       const products = (await rpc(ctx, 'dev_store_catalog', {}, 'anon')) || [];
+      // Every payment method that is switched on and has its credentials: the built-ins and any a plugin added.
       let methods = [];
       if (ctx.supabase.secretKey) {
         const config = await readPaymentsConfig(ctx).catch(() => null);
-        if (config) methods = Object.entries(config).filter(([, value]) => value.enabled).map(([name]) => ({ id: name, label: PROVIDER_LABELS[name] }));
+        const present = config ? await storedSecretNames(ctx).catch(() => null) : null;
+        if (config && present) {
+          methods = (await gatewayChecks({ config, present })).filter((gateway) => gateway.ready)
+            .map((gateway) => ({ id: gateway.id, label: gateway.buyer_label || gateway.label }));
+        }
       }
       return { status: 200, body: { products, methods } };
     },
@@ -131,6 +138,13 @@ const developersServer = {
       const body = ctx.json() || {};
       const result = await startCheckout(ctx, user, { productId: isUuid(body.product_id), provider: String(body.provider || '') });
       return { status: 200, body: { url: result.url } };
+    },
+
+    // Back from a gateway that confirms on return (PayPal, or a plugin gateway without a webhook): read the payment from the gateway.
+    'POST checkout/return': async (ctx) => {
+      const user = await signedIn(ctx);
+      const body = ctx.json() || {};
+      return { status: 200, body: await confirmReturn(ctx, user, { orderId: isUuid(body.order_id, 'order'), gatewayId: String(body.gateway || ''), query: body.query }) };
     },
 
     'GET my/licenses': async (ctx) => {
@@ -223,6 +237,13 @@ const developersServer = {
       });
     },
 
+    // Any gateway this shop offers, by id (a plugin gateway's callback address; the built-ins keep their own addresses above).
+    // An unverified call is refused (401) and changes nothing; a verified payment for an order that is not this gateway's is acknowledged.
+    'POST webhook/gateway/:id': async (ctx) => ({
+      status: 200,
+      body: await applyGatewayWebhook(ctx, { gatewayId: String(ctx.params?.id || ''), rawBody: ctx.rawBody || Buffer.alloc(0), headers: ctx.headers || {} }),
+    }),
+
     /* ------------------------------------------------------------------------------------- the owner */
     'GET admin/status': async (ctx) => {
       await requireOwner(ctx);
@@ -280,7 +301,25 @@ const developersServer = {
       const user = await signedIn(ctx);
       if (ctx.json()?.id) await refuseManaged(ctx, { productId: isUuid(ctx.json().id) });
       const saved = await saveProduct(ctx, ctx.json() || {}, user.id);
-      return { status: 200, body: { product: saved } };
+      return { status: 200, body: { product: saved, listing_update: await autoSendListing(ctx, saved?.id) } };
+    },
+
+    // The React-WP marketplace listing of this shop's plugins (server/listing.mjs): over the site's account link.
+    'GET admin/listing': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await listingOverview(ctx, { refresh: String(ctx.query?.refresh || '') === '1' }) };
+    },
+
+    'POST admin/listing/send': async (ctx) => {
+      await requireOwner(ctx);
+      const productId = isUuid(ctx.json()?.product_id);
+      await refuseManaged(ctx, { productId });
+      return { status: 200, body: await sendToMarketplace(ctx, { productId }) };
+    },
+
+    'POST admin/listing/stop': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await stopListing(ctx, isUuid(ctx.json()?.product_id)) };
     },
 
     'POST admin/products/delete': async (ctx) => {
@@ -300,14 +339,16 @@ const developersServer = {
         productId: isUuid(fields.product_id), version: fields.version, changelog: fields.changelog,
         bytes: new Uint8Array(parsed.file), acceptFindings: fields.accept_findings === 'true', userId: user.id,
       });
-      return { status: 201, body: result };
+      return { status: 201, body: { ...result, listing_update: await autoSendListing(ctx, isUuid(fields.product_id)) } };
     },
 
     'POST admin/versions/status': async (ctx) => {
       await requireOwner(ctx);
       const body = ctx.json() || {};
       await refuseManaged(ctx, { versionId: isUuid(body.version_id, 'version') });
-      return { status: 200, body: await setVersionStatus(ctx, { versionId: isUuid(body.version_id, 'version'), status: String(body.status || '') }) };
+      const result = await setVersionStatus(ctx, { versionId: isUuid(body.version_id, 'version'), status: String(body.status || '') });
+      const productId = (await select(ctx, `dev_versions?id=eq.${enc(isUuid(body.version_id, 'version'))}&select=product_id`, 'service'))[0]?.product_id;
+      return { status: 200, body: { ...result, listing_update: await autoSendListing(ctx, productId) } };
     },
 
     'POST admin/versions/verify': async (ctx) => {
@@ -328,7 +369,7 @@ const developersServer = {
       const result = await importFromRelease(ctx, {
         productId, repositoryUrl: body.repository_url, acceptFindings: body.accept_findings === true, userId: user.id, token: body.token,
       });
-      return { status: 200, body: result };
+      return { status: 200, body: { ...result, listing_update: result?.changed ? await autoSendListing(ctx, result.product_id) : { sent: false } } };
     },
   },
 };

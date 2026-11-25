@@ -11,7 +11,8 @@
 </div>
 
 One plugin for people who make plugins. Everything it does happens on **your own site, in your own Supabase project, with
-your own payment accounts**. Nothing is sent to react-wp.com, and react-wp.com is not involved in what you sell.
+your own payment accounts**. react-wp.com never takes your money and never sees your payment credentials. The only thing
+ever sent there is a plugin you choose to list on the React-WP marketplace (see *List a plugin on the React-WP marketplace*).
 
 | Screen | What it is for |
 |---|---|
@@ -21,9 +22,8 @@ your own payment accounts**. Nothing is sent to react-wp.com, and react-wp.com i
 | **Payments & key** | Your Stripe and NOWPayments credentials, your licence public key, your package storage. |
 | **`/store`** (and `[rwp_developer_store]`) | The public shop: what is on sale, buy or claim, "My purchases" with downloads. |
 
-Free plugins you want **everyone** to find in the React-WP marketplace are published differently: give the marketplace your
-public GitHub repository and publish ordinary GitHub releases (see the marketplace's README). This plugin is for what you
-**sell or hand out yourself**.
+This plugin is for what you **sell or hand out yourself**. To be found on **react-wp.com/plugins** as well, send a plugin from
+its screen to the React-WP marketplace: you stay the seller (see below).
 
 ## For you, the developer (Owner of the site)
 
@@ -43,6 +43,9 @@ public GitHub repository and publish ordinary GitHub releases (see the marketpla
      switch while you test.
    - Switch the methods on and save. Credentials are sealed on the server and are never shown again; the screen only says
      whether each is set.
+   - **Other payment methods:** a plugin active on your site can add a payment gateway (see `docs/extending-react-wp.md`). It is
+     listed under *More payment methods (added by plugins)*, off until you switch it on and save its fields; its callback
+     address is shown there. Refunds go through it when it supports them, else you send them by hand and record them.
 4. Your **licence key pair** is created the first time a method is switched on. The screen shows the public half and a short
    check you paste into a plugin you sell.
 
@@ -61,11 +64,46 @@ public GitHub repository and publish ordinary GitHub releases (see the marketpla
    calls, storage access) is stored but **held back** until you publish it or tick "publish even if the scan finds
    something to read".
 3. Set the **price** (0 = free), optionally how many **days a licence lasts** (empty = lifetime), and set the plugin **On sale**.
-   A plugin with no published version cannot be put on sale.
+   A plugin with no published version cannot be put on sale. A plugin **with a price** cannot be put on sale (or given a price
+   while it is on sale) until **Payments & key** is finished: at least one method switched on with all its credentials, and the
+   licence key pair created. The plugin screen says so and links there; the server refuses it too. A free plugin needs nothing.
 4. Your shop is at **`/store`**, or put `[rwp_developer_store title="Plugins"]` on any page.
 
 A buyer signs in, pays (or claims a free plugin), and finds their **licence key** and a **Download** button under *My
 purchases*. They install the ZIP under *Plugins → Upload* and enter the key where your plugin asks for it.
+
+### List a plugin on the React-WP marketplace (react-wp.com/plugins)
+
+You stay the seller: sales, refunds and support are yours. react-wp.com shows your plugin with a *Sold by the developer* box
+(your site's address and how your shop takes payment), and its **Buy on the developer's store** button sends customers to
+**your** `/store?plugin=<id>` (that plugin is shown first and highlighted), where your own Stripe/NOWPayments takes the money
+and your own key signs the licence.
+
+1. Have an account on react-wp.com. On your site open **Plugins → Connect to react-wp.com** and connect with a pairing code
+   from your react-wp.com account (the same account link customers use; `RWP_SECRET_BOX_KEY` must be set).
+2. Put the plugin **On sale** in your shop with a published version. A plugin with a price also needs **Payments & key**
+   finished (a ready payment method and your licence key pair).
+3. Open the plugin under **Developers → Your plugins** and press **Send to React-WP Marketplace** (bottom of the screen).
+   Its package, price, the names of your ready payment methods and your licence **public** key are sent. No credential is
+   sent; the site token stays sealed on your server.
+4. The marketplace owner reviews it **once** (it waits in their *Inventory → Pending*). The screen shows the status
+   (*Waiting for approval*, *Live*, *Rejected*…); it is refreshed from react-wp.com each time the screen opens.
+5. After that it is automatic: every **new version** you publish here and every **price change** is sent by itself and goes
+   live after react-wp.com's own scan (no new review), until you press **Stop sending updates**. If an automatic send fails,
+   your change here still stands and the reason is shown on the plugin; press **Send update now** to retry.
+
+Notes and limits:
+- The plugin id must not be used by someone else's plugin on react-wp.com, and a plugin is listed from one site only.
+- A free plugin is installed from the marketplace like any free plugin (react-wp.com stores its scanned copy).
+- A plugin with a price is never handed out by react-wp.com; buyers download it from your `/store`.
+- Buyers can review the plugin on react-wp.com, and report problems to the marketplace owner, by pasting the licence key
+  your shop gave them (it is checked against your licence public key). You can answer reviews there when you are signed
+  in to react-wp.com with the account the site is connected to. The plugin screen here shows how many complaints are open
+  (the count only; the owner reads them).
+- *Stop sending updates* does not remove the listing; ask the marketplace owner to unlist it. The owner can also reject or
+  unlist it, for example after complaints.
+- On Vercel a request body is limited to about 4.5 MB, so a larger package cannot be sent this way yet.
+- Re-apply `schema.sql` after updating (new table `dev_listings`).
 
 ### Your marketplace plugins are listed here too
 
@@ -157,6 +195,9 @@ the licence.
   `service_role` access to the `dev_*` tables.
   RLS is on everywhere; `dev_secrets` has none (server only). `dev_place_order`, `dev_complete_order`, `dev_verify_license`
   and `dev_record_version` are service-role only.
+- `server/listing.mjs`: the marketplace listing (`admin/listing`, `admin/listing/send`, `admin/listing/stop`, and `autoSendListing`
+  after a save, upload, publish/withdraw or GitHub import). It calls react-wp.com only through core `platformRequest`
+  (`server/licenseLink.mjs`), which allows `developer/*` routes only. `dev_listings` is owner-read, server-written.
 - `server.mjs` routes; `server/store.mjs` logic; `server/payments.mjs`, `server/license.mjs`, `server/secrets.mjs`,
   `server/supabase.mjs`. The scanner and the GitHub release reader are core (`server/pluginVet.mjs`, `server/releaseSource.mjs`).
 - Tests: `tests/developers.test.mjs` (server logic, in-memory Supabase) and `tests/sqlChecks/developers.mjs` (real Postgres via

@@ -3,6 +3,7 @@
 -- Deliberately keeps: the packages uploaded to Supabase Storage (bucket rwp-developer-packages): delete that bucket
 -- in the Supabase dashboard if you want the files gone. Nothing outside these tables and functions is touched.
 
+drop table if exists public.dev_listings cascade;
 drop table if exists public.dev_refunds cascade;
 drop table if exists public.dev_licenses cascade;
 drop table if exists public.dev_orders cascade;

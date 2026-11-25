@@ -84,6 +84,9 @@ create table if not exists public.dev_orders (
 -- How much of a paid order was given back. Written only by dev_refund_settle; a fully refunded order is `refunded`.
 alter table public.dev_orders add column if not exists refunded_amount numeric(12,2) not null default 0;
 alter table public.dev_orders add column if not exists refunded_at timestamptz;
+-- Payment gateways a plugin adds (server/payments/registry.mjs) are recorded under their own id (20261125).
+alter table public.dev_orders drop constraint if exists dev_orders_provider_check;
+alter table public.dev_orders add constraint dev_orders_provider_check check (provider = 'free' or provider ~ '^[a-z][a-z0-9_-]{1,30}$');
 create index if not exists dev_orders_buyer_idx on public.dev_orders(buyer_id, created_at desc);
 create index if not exists dev_orders_product_idx on public.dev_orders(product_id);
 -- A provider's payment id can complete one order only.
@@ -229,7 +232,8 @@ begin
   if v_product.price = 0 and p_provider <> 'free' then
     raise exception 'This plugin is free; claim it instead of paying.' using errcode = '22023';
   end if;
-  if v_product.price > 0 and p_provider not in ('stripe', 'nowpayments') then
+  -- 'stripe', 'nowpayments', or a gateway a plugin added (its id; the server only passes a gateway this shop has switched on).
+  if v_product.price > 0 and (p_provider = 'free' or p_provider !~ '^[a-z][a-z0-9_-]{1,30}$') then
     raise exception 'Choose a payment method.' using errcode = '22023';
   end if;
   insert into public.dev_orders (product_id, buyer_id, provider, amount, currency)
@@ -721,5 +725,35 @@ revoke insert, update, delete on public.dev_licenses from authenticated;
 grant update (status, revoked_at, domain) on public.dev_licenses to authenticated;
 revoke all on public.dev_versions from anon;
 revoke all on public.dev_settings from anon;
+
+-- Listing on the React-WP marketplace (20261125): a plugin of this shop the owner sent to react-wp.com, over the account link
+-- (server/listing.mjs). One row per product. Owner-only: `dev_products` is publicly readable for plugins on sale, so what
+-- react-wp.com answered (review status, scan notes, errors) is kept here instead.
+--   requested      true while new versions and price changes are sent automatically; false after "Stop sending updates"
+--   sent_version   the last version whose package react-wp.com received; sent_price the price it was last told
+--   status         react-wp.com's listing status (pending, approved, rejected, unlisted, deprecated), '' before the first answer
+create table if not exists public.dev_listings (
+  product_id uuid primary key references public.dev_products(id) on delete cascade,
+  requested boolean not null default false,
+  sent_version text not null default '',
+  sent_price numeric(10,2),
+  status text not null default '',
+  message text not null default '',
+  error text not null default '',
+  plugin_id uuid,
+  sent_at timestamptz,
+  checked_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+-- How many buyer complaints about the listing are open on react-wp.com (a count only; the marketplace owner reads them).
+alter table public.dev_listings add column if not exists open_complaints integer not null default 0;
+alter table public.dev_listings enable row level security;
+drop policy if exists "Owners read developer listings" on public.dev_listings;
+create policy "Owners read developer listings"
+  on public.dev_listings for select to authenticated
+  using (public.user_has_cap('manage_options'));
+revoke all on public.dev_listings from anon;
+revoke insert, update, delete on public.dev_listings from authenticated;
+grant all on public.dev_listings to service_role;
 
 notify pgrst, 'reload schema';

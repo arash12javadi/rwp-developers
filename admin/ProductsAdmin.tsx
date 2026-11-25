@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type ComponentType, type FormEvent } from 'react';
 import { applyFilters } from '../../../src/core/hooks';
 import {
-  deleteProduct, importRelease, listProducts, listVersions, saveProduct, setVersionStatus, syncMarketplace, uploadVersion, verifyStored,
+  adminStatus, deleteProduct, importRelease, listingOverview, listProducts, listVersions, saveProduct, sendListing, setVersionStatus, stopListing,
+  syncMarketplace, uploadVersion, verifyStored,
 } from '../lib/api';
-import type { DevProduct, DevVersion, ImportResult, UploadResult, VetReportShape } from '../lib/types';
+import type { DevListing, DevProduct, DevVersion, ImportResult, ListingOverview, UploadResult, VetReportShape } from '../lib/types';
 import styles from '../developers.module.css';
 
 const CATEGORIES = ['utility', 'commerce', 'marketing', 'seo', 'media', 'developer', 'integration'];
@@ -14,6 +15,27 @@ const price = (value: number) => (Number(value) > 0 ? `$${Number(value).toFixed(
 /** What the marketplace's `rwp_developers_marketplace_manage` component takes (rwp-plugin-marketplace/admin/DeveloperManage.tsx). */
 interface MarketplaceManageProps { pluginId?: string | null; slug: string; onClose: () => void; onChanged: () => void }
 const sizeLabel = (bytes: number) => (bytes > 0 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : '—');
+const PAYMENTS_HREF = '/admin?section=rwp-developers&tab=payments';
+
+/**
+ * Whether a buyer could pay right now: a payment method with all its credentials, and the licence key pair.
+ * `null` while unknown (still loading, or the status could not be read); the server checks again on save.
+ */
+function useReadyToSell(): boolean | null {
+  const [ready, setReady] = useState<boolean | null>(null);
+  useEffect(() => {
+    let alive = true;
+    adminStatus()
+      .then((status) => {
+        if (!alive) return;
+        const method = status.checks.stripe.ready || status.checks.nowpayments.ready;
+        setReady(method && Boolean(status.license_public_key));
+      })
+      .catch(() => { if (alive) setReady(null); });
+    return () => { alive = false; };
+  }, []);
+  return ready;
+}
 
 function Findings({ report }: { report?: VetReportShape }) {
   const bad = (report?.checks || []).filter((check) => !check.ok);
@@ -177,6 +199,116 @@ function VersionsPanel({ product, onChanged }: { product: DevProduct; onChanged:
   );
 }
 
+const LISTING_STATUS: Record<string, string> = {
+  pending: 'Waiting for the marketplace owner to approve it',
+  approved: 'Live on react-wp.com/plugins',
+  rejected: 'Rejected',
+  unlisted: 'Hidden by the marketplace owner',
+  deprecated: 'Marked as no longer maintained',
+};
+
+/**
+ * Listing on the React-WP marketplace (react-wp.com/plugins): send the plugin over this site's account link, see what
+ * react-wp.com answered, stop automatic updates. This shop stays the seller (Buy on react-wp.com comes to this /store).
+ */
+function MarketplaceListingPanel({ product, readyToSell }: { product: DevProduct; readyToSell: boolean | null }) {
+  const [overview, setOverview] = useState<ListingOverview | null>(null);
+  const [busy, setBusy] = useState('');
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  const load = useCallback(async (refresh: boolean) => {
+    try {
+      setOverview(await listingOverview(refresh));
+    } catch (loadError) {
+      setError(errorText(loadError, 'Could not read the marketplace listing.'));
+    }
+  }, []);
+  useEffect(() => { load(true); }, [load]);
+
+  const listing: DevListing | undefined = overview?.listings.find((row) => row.product_id === product.id);
+  const priced = Number(product.price) > 0;
+  const blockers = [
+    overview && !overview.connected ? 'Connect this site to your react-wp.com account first: Plugins → Connect to react-wp.com.' : '',
+    product.status !== 'published' || !product.current_version ? 'Put the plugin on sale in your own shop first (with a published version).' : '',
+    priced && readyToSell === false ? 'Finish Developers → Payments & key: a plugin with a price needs a shop that can take payments.' : '',
+  ].filter(Boolean);
+
+  const send = async () => {
+    setBusy('send');
+    setError('');
+    setMessage('');
+    try {
+      const result = await sendListing(product.id);
+      setMessage(result.sent_package
+        ? `Version ${product.current_version} was sent to react-wp.com. ${result.message}`.trim()
+        : `Price and payment methods were sent to react-wp.com. ${result.message}`.trim());
+      await load(false);
+    } catch (sendError) {
+      setError(errorText(sendError, 'Could not send the plugin to react-wp.com.'));
+      await load(false);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const stop = async () => {
+    setBusy('stop');
+    setError('');
+    setMessage('');
+    try {
+      await stopListing(product.id);
+      setMessage('Automatic updates are off. The listing stays on react-wp.com until the marketplace owner removes it.');
+      await load(false);
+    } catch (stopError) {
+      setError(errorText(stopError, 'Could not stop the updates.'));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 14 }}>
+      <h4 className={styles.panelTitle}>React-WP Marketplace</h4>
+      <p className={styles.hint}>
+        List this plugin on react-wp.com/plugins. The marketplace owner approves it once; after that every new version you publish here, and every
+        price change, is sent and goes live after react-wp.com&apos;s own scan. You stay the seller: {priced
+          ? 'Buy on react-wp.com sends customers to your /store, where your own payment accounts take the money and your key signs their licence.'
+          : 'a free plugin is installed from the marketplace like any free plugin.'} Support is yours too.
+      </p>
+      {error && <p className={styles.error} role="alert">{error}</p>}
+      {message && <p className={styles.notice} role="status">{message}</p>}
+      {overview?.refresh_error && <p className={styles.hint}>react-wp.com could not be asked for the latest status: {overview.refresh_error}</p>}
+      {listing && (
+        <ul className={styles.hint}>
+          <li>Status: <strong>{LISTING_STATUS[listing.status] || listing.status || 'Sent, no answer yet'}</strong>{listing.checked_at ? ` · checked ${when(listing.checked_at)}` : ''}</li>
+          <li>Version on react-wp.com: {listing.sent_version || '—'} · price sent: {listing.sent_price === null ? '—' : price(Number(listing.sent_price))} · last sent {when(listing.sent_at)}</li>
+          <li>Automatic updates: {listing.requested ? 'on' : 'off'}</li>
+          {(listing.open_complaints || 0) > 0 && (
+            <li className={styles.error}>
+              {listing.open_complaints} buyer complaint{listing.open_complaints === 1 ? ' is' : 's are'} open on react-wp.com. The marketplace owner reads them and
+              may unlist the plugin; answering your buyers&apos; support requests and refunds quickly is the best way to avoid that.
+            </li>
+          )}
+          {listing.message && <li>react-wp.com: {listing.message}</li>}
+          {listing.error && <li className={styles.error}>The last send failed: {listing.error}</li>}
+        </ul>
+      )}
+      {blockers.length > 0 && (
+        <ul className={styles.error} role="status">{blockers.map((text) => <li key={text}>{text}</li>)}</ul>
+      )}
+      <div className={styles.row}>
+        <button type="button" className={styles.button} disabled={busy !== '' || !overview || blockers.length > 0} onClick={send}>
+          {busy === 'send' ? 'Sending…' : listing ? 'Send update now' : 'Send to React-WP Marketplace'}
+        </button>
+        {listing?.requested && (
+          <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy !== ''} onClick={stop}>{busy === 'stop' ? 'Stopping…' : 'Stop sending updates'}</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** One plugin: its details, its GitHub link, and its versions. */
 function ProductPanel({ product, onChanged, onDeleted, onClose }: { product: DevProduct; onChanged: () => void; onDeleted: () => void; onClose: () => void }) {
   const [title, setTitle] = useState(product.title);
@@ -191,6 +323,8 @@ function ProductPanel({ product, onChanged, onDeleted, onClose }: { product: Dev
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [confirm, setConfirm] = useState(false);
+  const readyToSell = useReadyToSell();
+  const needsPayments = readyToSell === false && Number(amount) > 0;
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -300,11 +434,17 @@ function ProductPanel({ product, onChanged, onDeleted, onClose }: { product: Dev
             <label htmlFor={`s-${product.id}`}>In the shop</label>
             <select id={`s-${product.id}`} className={styles.select} value={status} disabled={busy !== ''} onChange={(event) => setStatus(event.target.value as DevProduct['status'])}>
               <option value="draft">Draft (hidden)</option>
-              <option value="published">On sale</option>
+              <option value="published" disabled={needsPayments && product.status !== 'published'}>On sale</option>
               <option value="archived">Archived</option>
             </select>
           </div>
         </div>
+        {needsPayments && (
+          <p className={styles.error} role="alert">
+            This plugin has a price, but your shop cannot take payments yet. Finish <a href={PAYMENTS_HREF}>Developers → Payments &amp; key</a> first
+            (switch on Stripe or NOWPayments and save its credentials), then put it on sale. A free plugin (price 0) needs nothing.
+          </p>
+        )}
         <div className={styles.field}>
           <label htmlFor={`x-${product.id}`}>Description</label>
           <textarea id={`x-${product.id}`} className={styles.textarea} rows={3} value={description} disabled={busy !== ''} onChange={(event) => setDescription(event.target.value)} />
@@ -342,6 +482,8 @@ function ProductPanel({ product, onChanged, onDeleted, onClose }: { product: Dev
       )}
 
       <div style={{ marginTop: 14 }}><VersionsPanel product={product} onChanged={onChanged} /></div>
+
+      <MarketplaceListingPanel product={product} readyToSell={readyToSell} />
 
       <div style={{ marginTop: 14 }}>
         <h4 className={styles.panelTitle}>Remove</h4>

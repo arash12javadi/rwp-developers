@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { getSupabaseClient } from '../../../src/lib/db';
 import {
-  askForRefund, claimPlugin, downloadMine, loadStore, myLicenses, myRefunds, releaseMyDomain, startCheckout, withdrawRefund,
+  askForRefund, claimPlugin, confirmCheckout, downloadMine, loadStore, myLicenses, myRefunds, releaseMyDomain, startCheckout, withdrawRefund,
 } from '../lib/api';
 import type { DevRefund, DevRefundStatus, MyLicense, StoreCatalog, StoreProduct } from '../lib/types';
 import styles from '../developers.module.css';
@@ -35,6 +35,21 @@ export default function Store({ title = 'Plugins', intro = '' }: { title?: strin
   const [error, setError] = useState('');
   const params = typeof window === 'undefined' ? new URLSearchParams() : new URLSearchParams(window.location.search);
   const returned = params.get('paid') === '1';
+  // Back from a gateway that confirms on return (PayPal, or a plugin's): the server reads the payment from the gateway once.
+  const returnedGateway = (params.get('gateway') || '').trim();
+  const returnedOrder = (params.get('order') || '').trim();
+  const confirmed = useRef(false);
+  // `?plugin=<id>`: a buyer sent here by Buy on react-wp.com/plugins. That plugin is shown first and highlighted.
+  const wanted = (params.get('plugin') || '').trim().toLowerCase();
+  const here = typeof window === 'undefined' ? '/store' : `${window.location.pathname}${wanted ? `?plugin=${encodeURIComponent(wanted)}` : ''}`;
+  const products = catalog
+    ? [...catalog.products].sort((a, b) => Number(b.slug === wanted) - Number(a.slug === wanted))
+    : [];
+  const focused = wanted ? products.find((product) => product.slug === wanted) : undefined;
+
+  useEffect(() => {
+    if (focused && typeof document !== 'undefined') document.getElementById(`plugin-${focused.slug}`)?.scrollIntoView({ block: 'center' });
+  }, [focused]);
 
   const loadLicenses = useCallback(async () => {
     try { setLicenses(await myLicenses()); } catch { setLicenses([]); }
@@ -47,6 +62,14 @@ export default function Store({ title = 'Plugins', intro = '' }: { title?: strin
   }, []);
 
   useEffect(() => { if (user) void loadLicenses(); else setLicenses([]); }, [user, loadLicenses]);
+
+  useEffect(() => {
+    if (!returned || !user || !returnedGateway || !returnedOrder || confirmed.current) return;
+    confirmed.current = true;
+    const query = Object.fromEntries(params.entries());
+    confirmCheckout(returnedOrder, returnedGateway, query).then(() => loadLicenses()).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [returned, user, returnedGateway, returnedOrder, loadLicenses]);
 
   // Coming back from the payment page: the provider's confirmation reaches the shop a moment later, so look a few times.
   useEffect(() => {
@@ -111,11 +134,13 @@ export default function Store({ title = 'Plugins', intro = '' }: { title?: strin
       </div>
       {error && <p className={styles.error} role="alert">{error}</p>}
       {message && <p className={styles.notice} role="status">{message}</p>}
+      {catalog && wanted && !focused && <p className={styles.hint} role="status">The plugin you were looking for is not on sale here right now.</p>}
 
-      {!catalog ? <p className={styles.muted}>Loading…</p> : !catalog.products.length ? <p className={styles.hint}>Nothing is for sale yet.</p> : (
+      {!catalog ? <p className={styles.muted}>Loading…</p> : !products.length ? <p className={styles.hint}>Nothing is for sale yet.</p> : (
         <ul className={styles.cards}>
-          {catalog.products.map((product) => (
-            <li key={product.id} className={styles.card}>
+          {products.map((product) => (
+            <li key={product.id} id={`plugin-${product.slug}`} className={product === focused ? `${styles.card} ${styles.cardFocused}` : styles.card}
+              aria-current={product === focused ? 'true' : undefined}>
               <h2 className={styles.cardTitle}>{product.title}</h2>
               <span className={styles.cardMeta}>{product.category} · version {product.version}</span>
               <p className={styles.cardText}>{product.description || 'No description yet.'}</p>
@@ -124,7 +149,7 @@ export default function Store({ title = 'Plugins', intro = '' }: { title?: strin
                 {owned(product) ? (
                   <span className={`${styles.badge} ${styles.ready}`}>You own this</span>
                 ) : user === '' ? (
-                  <a className={styles.button} href={`/login?redirect=${encodeURIComponent('/store')}`}>Sign in to get it</a>
+                  <a className={styles.button} href={`/login?redirect=${encodeURIComponent(here)}`}>Sign in to get it</a>
                 ) : Number(product.price) <= 0 ? (
                   <button type="button" className={styles.button} disabled={busy !== '' || user === null} onClick={() => claim(product)}>{busy === product.id ? 'Getting it…' : 'Get it free'}</button>
                 ) : catalog.methods.length ? (

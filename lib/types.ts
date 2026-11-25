@@ -25,6 +25,26 @@ export interface DevProduct {
   created_at: string;
 }
 
+/** One plugin of this shop sent to the React-WP marketplace (`dev_listings`). */
+export interface DevListing {
+  product_id: string;
+  /** True while new versions and price changes are sent by themselves. */
+  requested: boolean;
+  sent_version: string;
+  sent_price: number | null;
+  /** react-wp.com's listing status: pending, approved, rejected, unlisted, deprecated; '' before the first answer. */
+  status: string;
+  message: string;
+  error: string;
+  plugin_id: string | null;
+  sent_at: string | null;
+  checked_at: string | null;
+  /** Buyer complaints still open on react-wp.com (a count only). */
+  open_complaints?: number;
+}
+export interface ListingOverview { connected: boolean; domain: string; listings: DevListing[]; refresh_error: string }
+export interface ListingSendResult { listing: DevListing | null; verdict: string; message: string; sent_package: boolean }
+
 export interface VetFinding { name: string; ok: boolean; detail: string }
 export interface VetReportShape { pass?: boolean; severity?: 'clean' | 'advisory' | 'critical'; checks?: VetFinding[]; flags?: string[] }
 
@@ -127,16 +147,36 @@ export interface DevRefund {
   order?: { id: string; product_id: string; provider: DevOrder['provider']; amount: number; refunded_amount: number; currency: string; created_at: string } | null;
   product?: { id: string; title: string; slug: string } | null;
   buyer_name?: string;
-  refund_method?: 'stripe' | 'manual';
+  /** The gateway that refunds through its own API ('stripe', or a plugin gateway's id), or 'manual'. */
+  refund_method?: string;
 }
 
-export interface DevRefundResult { refund: DevRefund; sent: boolean; method?: 'stripe' | 'manual'; refund_id?: string; message?: string }
+export interface DevRefundResult { refund: DevRefund; sent: boolean; method?: string; refund_id?: string; message?: string }
 
 export interface ProviderCheck { enabled: boolean; missing: string[]; ready: boolean }
+/** One credential field a payment gateway asks for (server/payments/registry.mjs). */
+export interface GatewayField { name: string; label: string; type: 'secret' | 'text' | 'boolean'; required: boolean; help: string }
+/** A payment gateway as the Payments screen sees it: names, fields (never values), switch, and what it still needs. */
+export interface GatewayCheck {
+  id: string;
+  label: string;
+  buyer_label: string;
+  description: string;
+  built_in: boolean;
+  plugin: string;
+  credential_fields: GatewayField[];
+  supports: { refund: boolean; confirmReturn: boolean; webhook: boolean; probe: boolean };
+  enabled: boolean;
+  missing: string[];
+  ready: boolean;
+  webhook_url: string;
+}
 export interface PaymentStatus {
   config: { stripe: { enabled: boolean }; nowpayments: { enabled: boolean; sandbox: boolean; pay_currency: string } };
   secrets: Record<string, boolean>;
   checks: { stripe: ProviderCheck; nowpayments: ProviderCheck };
+  /** Every gateway, the built-ins first, then the ones active plugins added. */
+  gateways?: GatewayCheck[];
   secret_box: boolean;
   license_public_key: string;
   webhook_urls: { stripe: string; nowpayments: string };
@@ -148,6 +188,8 @@ export interface PaymentSettingsInput {
   nowpayments: { enabled: boolean; sandbox: boolean; pay_currency?: string };
   secrets: Record<string, string>;
   clear?: string[];
+  /** Plugin gateways: the switch, and any field typed (blank = keep the stored one). */
+  gateways?: Record<string, { enabled: boolean; fields: Record<string, string | boolean> }>;
 }
 
 export interface UploadResult { version: string; status: string; current: boolean; held: boolean; severity: 'clean' | 'advisory' | 'critical'; report: VetReportShape; sha256: string }

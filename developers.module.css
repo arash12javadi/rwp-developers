@@ -37,6 +37,7 @@
 .storeHead { margin-bottom: 18px; }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; padding: 0; margin: 0; list-style: none; }
 .card { border: 1px solid #dcdcde; border-radius: 10px; padding: 16px; background: #fff; display: flex; flex-direction: column; gap: 8px; }
+.cardFocused { border: 2px solid #2271b1; box-shadow: 0 0 0 3px rgba(34, 113, 177, 0.15); }
 .cardTitle { margin: 0; font-size: 17px; font-weight: 600; }
 .cardMeta { color: #646970; font-size: 13px; }
 .cardText { margin: 0; flex: 1; line-height: 1.5; }

@@ -1,7 +1,7 @@
 import { describeDbError, getSupabaseClient } from '../../../src/lib/db';
 import type {
-  DevLicense, DevOrder, DevProduct, DevRefund, DevRefundResult, DevVersion, ImportResult, MyLicense, PaymentSettingsInput, PaymentStatus,
-  StoreCatalog, UploadResult,
+  DevLicense, DevOrder, DevProduct, DevRefund, DevRefundResult, DevVersion, ImportResult, ListingOverview, ListingSendResult, MyLicense,
+  PaymentSettingsInput, PaymentStatus, StoreCatalog, UploadResult,
 } from './types';
 
 const ROUTES = '/api/plugins/rwp-developers';
@@ -40,6 +40,9 @@ const get = <T>(route: string) => request<T>(route, 'GET');
 /* --------------------------------------------------------------------------------------------- the store */
 export const loadStore = () => get<StoreCatalog>('store/catalog');
 export const claimPlugin = (productId: string) => post<{ license_key: string }>('claim', { product_id: productId });
+/** Back from a gateway that confirms on return: the server reads the payment from the gateway. */
+export const confirmCheckout = (orderId: string, gateway: string, query: Record<string, string>) =>
+  post<{ status: string; pending?: boolean }>('checkout/return', { order_id: orderId, gateway, query });
 export const startCheckout = (productId: string, provider: string) => post<{ url: string }>('checkout/start', { product_id: productId, provider });
 export const myLicenses = () => get<{ licenses: MyLicense[] }>('my/licenses').then((answer) => answer.licenses);
 export const downloadMine = (licenseId: string) => post<{ download_url: string; version: string; sha256: string }>('my/download', { license_id: licenseId });
@@ -71,6 +74,10 @@ export const deleteProduct = (id: string) => post<{ deleted: boolean }>('admin/p
 export const setVersionStatus = (versionId: string, status: 'published' | 'withdrawn') => post<{ current_version: string }>('admin/versions/status', { version_id: versionId, status });
 export const verifyStored = (versionId: string) => post<{ ok: boolean }>('admin/versions/verify', { version_id: versionId });
 export const importRelease = (input: { repository_url?: string; product_id?: string; accept_findings?: boolean; token?: string }) => post<ImportResult>('admin/source/import', input);
+/** The React-WP marketplace listing of this shop's plugins. `refresh` also asks react-wp.com for each listing's status. */
+export const listingOverview = (refresh = false) => get<ListingOverview>(`admin/listing${refresh ? '?refresh=1' : ''}`);
+export const sendListing = (productId: string) => post<ListingSendResult>('admin/listing/send', { product_id: productId });
+export const stopListing = (productId: string) => post<{ listing: ListingOverview['listings'][number] }>('admin/listing/stop', { product_id: productId });
 
 /** The ZIP goes as multipart, so a large package is not base64-inflated into a JSON body. */
 export const uploadVersion = (input: { productId: string; version: string; changelog: string; file: File; acceptFindings: boolean }) => {

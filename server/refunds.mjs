@@ -9,7 +9,9 @@
  */
 import { HttpError, rpc, select } from './supabase.mjs';
 import { readSecret } from './secrets.mjs';
-import { createStripeRefund } from './payments.mjs';
+import { gatewayCredentials, gatewayErrorToHttp } from './payments.mjs';
+import { readPaymentsConfig } from './store.mjs';
+import { announcePayment, credentialStatus, getGateway } from '../../../server/payments/registry.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const enc = encodeURIComponent;
@@ -28,8 +30,11 @@ export const refundAmount = (value) => {
   return Math.round(amount * 100) / 100;
 };
 
-/** Stripe refunds through the API; NOWPayments (and anything else) is sent by hand and recorded. */
-export const refundMethod = (provider) => (provider === 'stripe' ? 'stripe' : 'manual');
+/**
+ * How the money of an order goes back: through the gateway's own refund API when it has one (Stripe, or a plugin gateway that
+ * offers refunds), its id is returned; anything else (NOWPayments, a gateway without refunds) is 'manual': sent by hand and recorded.
+ */
+export const refundMethod = (provider) => (getGateway(String(provider || ''))?.supports.refund ? String(provider) : 'manual');
 
 const COLUMNS = 'id,order_id,amount,currency,reason,owner_note,status,origin,revoke_license,gateway_refund_id,payout_reference,error,decided_at,refunded_at,created_at,updated_at';
 
@@ -113,36 +118,47 @@ export async function markRefunded(ctx, owner, body) {
   const settled = await rpc(ctx, 'dev_refund_settle', {
     p_refund: uuid(body?.refund_id, 'a request'), p_gateway_refund_id: null, p_payout_reference: reference, p_actor: owner.id,
   }, 'service');
+  await announcePayment('refund', { scope: 'developers', refund_id: settled?.id || body?.refund_id, amount: Number(settled?.amount || 0), currency: 'USD', method: 'manual', reference });
   return { refund: settled, sent: true, method: 'manual' };
 }
 
-/** Claim, refund at Stripe with an idempotency key, settle; or put it back with Stripe's reason. NOWPayments waits for the owner. */
+/**
+ * Claim, refund through the order's gateway with an idempotency key, settle; or put it back with the gateway's reason. A gateway
+ * without a refund API (NOWPayments) waits for the owner to send the money by hand and record it.
+ */
 export async function sendApproved(ctx, row, owner, { fetchImpl = fetch } = {}) {
   const order = (await select(ctx, `dev_orders?id=eq.${enc(row.order_id)}&select=provider`, 'service'))[0];
-  if (refundMethod(order?.provider) !== 'stripe') {
-    return { refund: row, sent: false, method: 'manual', message: 'Approved. This order was paid with NOWPayments (USDT), which has no refund API: send the money back from your wallet, then press "Mark as refunded" with the transaction hash.' };
+  const gateway = getGateway(String(order?.provider || ''));
+  if (!gateway?.refund) {
+    const how = order?.provider === 'nowpayments'
+      ? 'This order was paid with NOWPayments (USDT), which has no refund API: send the money back from your wallet'
+      : `This order was paid with ${gateway?.label || order?.provider || 'a payment method'} that cannot refund from here: send the money back yourself`;
+    return { refund: row, sent: false, method: 'manual', message: `Approved. ${how}, then press "Mark as refunded" with the reference.` };
   }
   const claimed = await rpc(ctx, 'dev_refund_claim', { p_refund: row.id }, 'service');
   let refund;
   try {
-    const secretKey = await readSecret(ctx, 'stripe_secret_key');
-    if (!secretKey) throw new HttpError(501, 'The Stripe secret key is not set under Developers → Payments & key.');
-    refund = await createStripeRefund({
-      secretKey, paymentIntent: claimed.provider_ref, amount: claimed.amount,
+    const credentials = await gatewayCredentials({ readSecret: (name) => readSecret(ctx, name), config: await readPaymentsConfig(ctx), gateway });
+    const status = credentialStatus(gateway, credentials);
+    if (!status.ready) throw new HttpError(501, `The ${gateway.label} credentials are not set under Developers → Payments & key.`);
+    refund = await gateway.refund({
+      credentials, reference: claimed.provider_ref, amount: claimed.amount, currency: 'USD',
       metadata: { rwp_refund: claimed.id, order_id: claimed.order_id },
       idempotencyKey: `rwpd-refund-${claimed.id}-${String(claimed.updated_at || '').replace(/[^0-9A-Za-z]/g, '')}`,
       fetchImpl,
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Stripe could not be reached.';
+  } catch (raw) {
+    const error = gatewayErrorToHttp(raw);
+    const message = error instanceof Error ? error.message : `${gateway.label} could not be reached.`;
     await rpc(ctx, 'dev_refund_release', { p_refund: claimed.id, p_error: message }, 'service').catch(() => {});
     throw new HttpError(error?.status === 409 || error?.status === 501 ? error.status : 502, `The refund was approved but not sent: ${message} Nothing was refunded; try again from Sales & licences.`);
   }
   try {
     const settled = await rpc(ctx, 'dev_refund_settle', { p_refund: claimed.id, p_gateway_refund_id: refund.id, p_payout_reference: '', p_actor: owner?.id || null }, 'service');
-    return { refund: settled, sent: true, method: 'stripe', refund_id: refund.id };
+    await announcePayment('refund', { scope: 'developers', refund_id: claimed.id, order_id: claimed.order_id, amount: Number(claimed.amount), currency: 'USD', method: gateway.id, reference: refund.id });
+    return { refund: settled, sent: true, method: gateway.id, refund_id: refund.id };
   } catch (error) {
-    throw new HttpError(500, `Stripe refunded the payment (refund ${refund.id}), but recording it here failed: ${error instanceof Error ? error.message : 'unknown error'}. Do not refund again: the Stripe webhook records it, or use "Mark as refunded" with that refund id.`);
+    throw new HttpError(500, `${gateway.label} refunded the payment (refund ${refund.id}), but recording it here failed: ${error instanceof Error ? error.message : 'unknown error'}. Do not refund again: use "Mark as refunded" with that refund id.`);
   }
 }
 

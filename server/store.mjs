@@ -18,12 +18,15 @@ import { isCommercialPlugin } from '../../../src/lib/pluginLicense.js';
 import { isDevEditionPlugin } from '../../../src/lib/pluginEdition.js';
 import { HttpError, deletePackage, insert, readPackage, remove, rpc, select, signedPackageUrl, update, uploadPackage } from './supabase.mjs';
 import {
-  clearSecret, clearSourceToken, licenseKeys, publicLicenseKey, readSecret, readSourceToken, requireSecretBox, secretsStatus, writeSecret, writeSourceToken,
+  clearSecret, clearSourceToken, licenseKeys, publicLicenseKey, readSecret, readSourceToken, requireSecretBox, secretsStatus, storedSecretNames,
+  writeSecret, writeSourceToken,
 } from './secrets.mjs';
 import { expiryDate, expiryStamp, newSerial, signLicenseKey, verifyLicenseKey } from './license.mjs';
 import {
-  PROVIDER_LABELS, PROVIDERS, createNowPaymentsInvoice, createStripeSession, paymentChecks, paymentsConfigFrom,
+  gatewayChecks, gatewayCredentials, gatewayEnabled, gatewayErrorToHttp, gatewaySecretName, paymentChecks, paymentsConfigFrom,
+  shopGateway, shopGateways, webhookUrl,
 } from './payments.mjs';
+import { announcePayment, checkoutOrder, credentialStatus, verifiedWebhookEvents } from '../../../server/payments/registry.mjs';
 
 const enc = encodeURIComponent;
 export const MAX_PACKAGE_BYTES = 40 * 1024 * 1024;
@@ -45,10 +48,13 @@ export async function paymentStatus(ctx) {
   const row = (await select(ctx, 'dev_settings?id=eq.true&select=license_public_key', 'service'))[0];
   let secretBox = true;
   try { requireSecretBox(); } catch { secretBox = false; }
+  // Every gateway (the two built-ins and any a plugin added), with its switch and what it still needs; never a value.
+  const gateways = await gatewayChecks({ config, present: await storedSecretNames(ctx) });
   return {
     config,
     secrets,
     checks: paymentChecks(config, secrets),
+    gateways: gateways.map((gateway) => ({ ...gateway, webhook_url: gateway.supports.webhook ? webhookUrl(ctx.origin, gateway.id) : '' })),
     secret_box: secretBox,
     license_public_key: row?.license_public_key || '',
     webhook_urls: {
@@ -59,11 +65,44 @@ export async function paymentStatus(ctx) {
 }
 
 /**
+ * Refuses to put a priced plugin on sale before Payments & key is finished: at least one payment method switched on with
+ * all its credentials, and the licence key pair created. A free plugin never needs this.
+ */
+export async function assertReadyToSell(ctx) {
+  const config = await readPaymentsConfig(ctx);
+  const gateways = await gatewayChecks({ config, present: await storedSecretNames(ctx) });
+  if (!gateways.some((gateway) => gateway.ready)) {
+    throw Object.assign(new HttpError(409, 'Finish Developers → Payments & key first: switch on a payment method (Stripe, NOWPayments or one a plugin added) and save its credentials. A priced plugin cannot be put on sale until a buyer can pay for it. A free plugin needs nothing.'), { code: 'payments_not_ready' });
+  }
+  const row = (await select(ctx, 'dev_settings?id=eq.true&select=license_public_key', 'service'))[0];
+  if (!row?.license_public_key) {
+    throw Object.assign(new HttpError(409, 'Your licence key pair is not created yet. Open Developers → Payments & key and save once: the pair is created there, and every sale needs it to sign the buyer\'s licence.'), { code: 'license_key_missing' });
+  }
+}
+
+/**
  * Saves the switches and any credential pasted. A blank credential field means "leave it as it is"; `clear` names the
  * ones to remove. Credentials are sealed before they are written and are never echoed back.
  */
 export async function savePayments(ctx, body) {
+  // Plugin gateways: `gateways: { <id>: { enabled, fields: { <field>: value } } }`; only gateways the registry offers this shop.
+  const offered = new Map((await shopGateways()).filter((gateway) => !gateway.builtIn).map((gateway) => [gateway.id, gateway]));
+  const asked = body?.gateways && typeof body.gateways === 'object' ? body.gateways : {};
+  const current = await readPaymentsConfig(ctx);
+  const extra = { ...current.gateways };
+  for (const [id, entry] of Object.entries(asked)) {
+    const gateway = offered.get(id);
+    if (!gateway) continue;
+    extra[id] = { enabled: entry?.enabled === true };
+    const fields = entry?.fields && typeof entry.fields === 'object' ? entry.fields : {};
+    for (const field of gateway.credentialFields) {
+      const raw = fields[field.name];
+      const value = field.type === 'boolean' ? (raw === undefined ? '' : String(raw === true || raw === 'true')) : String(raw ?? '').trim();
+      if (value) await writeSecret(ctx, gatewaySecretName(id, field.name), value);
+    }
+  }
   const next = paymentsConfigFrom({
+    gateways: extra,
     stripe: { enabled: body?.stripe?.enabled === true },
     nowpayments: {
       enabled: body?.nowpayments?.enabled === true,
@@ -78,7 +117,7 @@ export async function savePayments(ctx, body) {
   for (const name of Array.isArray(body?.clear) ? body.clear : []) await clearSecret(ctx, String(name));
   await update(ctx, 'dev_settings', 'id=eq.true', { payments: next }, 'service');
   // Creating the licence key pair now means the public key can be shown before the first sale.
-  if (next.stripe.enabled || next.nowpayments.enabled) await licenseKeys(ctx);
+  if (next.stripe.enabled || next.nowpayments.enabled || Object.values(next.gateways).some((entry) => entry.enabled)) await licenseKeys(ctx);
   return paymentStatus(ctx);
 }
 
@@ -143,8 +182,13 @@ export async function saveProduct(ctx, body, userId) {
     const live = await select(ctx, `dev_versions?product_id=eq.${enc(id)}&status=eq.published&select=version&limit=1`, 'service');
     if (!live.length) throw new HttpError(409, 'Upload a version first: a plugin with no published version cannot be put on sale.');
   }
-  // The same rule as the marketplace: what is sold is read from a private repository.
   const nextPrice = patch.price !== undefined ? patch.price : Number(current.price);
+  // A priced plugin goes on sale only when a buyer can actually pay: checked when it is put on sale, or made paid while on sale.
+  const nextStatus = patch.status !== undefined ? patch.status : current.status;
+  const goesOnSale = patch.status === 'published' && current.status !== 'published';
+  const becomesPaid = patch.price !== undefined && Number(patch.price) > 0 && !(Number(current.price) > 0);
+  if (nextStatus === 'published' && nextPrice > 0 && (goesOnSale || becomesPaid)) await assertReadyToSell(ctx);
+  // The same rule as the marketplace: what is sold is read from a private repository.
   if (nextPrice > 0 && current.source_repo && !current.source_private) {
     throw new HttpError(409, `${current.source_repo} is a public repository. The repository of a plugin that is sold must be private, so its source is not free for anyone to download. Make it private, save a read-only access token for it here, check for the release again, then set the price.`);
   }
@@ -330,10 +374,15 @@ export async function completePaid(ctx, { orderId, ref, amount, currency }) {
   const serial = newSerial();
   const key = signLicenseKey({ plugin: product.slug, stamp, serial, privateKey });
   const end = expiryDate(stamp);
-  return rpc(ctx, 'dev_complete_order', {
+  const result = await rpc(ctx, 'dev_complete_order', {
     p_order: order.id, p_provider_ref: ref || '', p_amount: amount ?? 0, p_currency: currency || 'usd',
     p_serial: serial, p_key: key, p_expires: end ? end.toISOString() : null,
   }, 'service');
+  // After SQL accepted it, once (a repeated callback returns the same licence with repeat: true).
+  if (!result?.repeat) {
+    await announcePayment('complete', { scope: 'developers', gateway: order.provider, order_id: order.id, amount: Number(amount ?? 0), currency: String(currency || 'usd').toUpperCase(), reference: ref || '', plugin: product.slug });
+  }
+  return result;
 }
 
 export async function claimFree(ctx, user, productId) {
@@ -344,31 +393,86 @@ export async function claimFree(ctx, user, productId) {
 
 /** Opens a payment for a product. The browser sent a product id and a provider name; everything else is read here. */
 export async function startCheckout(ctx, user, { productId, provider, fetchImpl = fetch }) {
-  if (!PROVIDERS.includes(provider)) throw new HttpError(400, 'Choose a payment method.');
+  const gateway = await shopGateway(provider);
   const config = await readPaymentsConfig(ctx);
-  if (!config[provider].enabled) throw new HttpError(409, `${PROVIDER_LABELS[provider]} is not available in this shop.`);
-  const secrets = await secretsStatus(ctx);
-  const checks = paymentChecks(config, secrets);
-  if (!checks[provider].ready) {
-    throw new HttpError(501, `${PROVIDER_LABELS[provider]} is switched on but not finished: ${checks[provider].missing.join(', ')} is not set. The shop owner has to finish it under Developers → Payments.`);
+  if (!gatewayEnabled(config, gateway.id)) throw new HttpError(409, `${gateway.label} is not available in this shop.`);
+  const credentials = await gatewayCredentials({ readSecret: (name) => readSecret(ctx, name), config, gateway });
+  const status = credentialStatus(gateway, credentials);
+  if (!status.ready) {
+    throw new HttpError(501, `${gateway.label} is switched on but not finished: ${status.missing.join(', ')} is not set. The shop owner has to finish it under Developers → Payments.`);
   }
-  const order = await rpc(ctx, 'dev_place_order', { p_product: productId, p_user: user.id, p_provider: provider }, 'service');
-  const success = `${ctx.origin}/store?order=${order.order_id}&paid=1`;
+  // The price is read in SQL from the product; the gateway is only handed the order's own amount.
+  const order = await rpc(ctx, 'dev_place_order', { p_product: productId, p_user: user.id, p_provider: gateway.id }, 'service');
+  const success = `${ctx.origin}/store?order=${order.order_id}&paid=1&gateway=${encodeURIComponent(gateway.id)}`;
   const cancel = `${ctx.origin}/store?cancelled=1`;
   try {
-    if (provider === 'stripe') {
-      return await createStripeSession({
-        secretKey: await readSecret(ctx, 'stripe_secret_key'), order, title: order.title, email: user.email, successUrl: success, cancelUrl: cancel, fetchImpl,
-      });
-    }
-    return await createNowPaymentsInvoice({
-      apiKey: await readSecret(ctx, 'nowpayments_api_key'), sandbox: config.nowpayments.sandbox, payCurrency: config.nowpayments.pay_currency,
-      order, title: order.title, callbackUrl: `${ctx.origin}/api/plugins/rwp-developers/webhook/nowpayments`, successUrl: success, cancelUrl: cancel, fetchImpl,
+    const opened = await gateway.createCheckout({
+      credentials,
+      order: await checkoutOrder({ id: order.order_id, amount: Number(order.amount), currency: String(order.currency || 'usd').toUpperCase(), title: order.title, email: user.email || '' }, { scope: 'developers', gateway }),
+      urls: { success, cancel, webhook: webhookUrl(ctx.origin, gateway.id) },
+      idempotencyKey: `rwpd-order-${order.order_id}`,
+      fetchImpl,
     });
+    if (!/^https?:\/\//i.test(String(opened?.url || ''))) throw new HttpError(502, `${gateway.label} did not return a payment address.`);
+    return { url: String(opened.url), id: String(opened.reference || '') };
   } catch (error) {
     await update(ctx, 'dev_orders', `id=eq.${enc(order.order_id)}`, { status: 'failed' }, 'service').catch(() => {});
-    throw error;
+    await announcePayment('failed', { scope: 'developers', gateway: gateway.id, order_id: order.order_id, amount: Number(order.amount), currency: 'USD', reason: error instanceof Error ? error.message : '' });
+    throw gatewayErrorToHttp(error);
   }
+}
+
+/**
+ * The buyer is back from a gateway that confirms on return (PayPal, or a plugin gateway without a webhook): the payment is read
+ * from the gateway with the shop's own credentials, never trusted from the address, and applied once.
+ */
+export async function confirmReturn(ctx, user, { orderId, gatewayId, query, fetchImpl = fetch }) {
+  const order = (await select(ctx, `dev_orders?id=eq.${enc(orderId)}&select=id,buyer_id,provider,status`, 'service'))[0];
+  if (!order || order.buyer_id !== user.id) throw new HttpError(404, 'That order is not yours.');
+  if (order.status === 'paid') return { status: 'paid' };
+  if (order.provider !== gatewayId) throw new HttpError(400, 'That order was opened with another payment method.');
+  const gateway = await shopGateway(gatewayId);
+  if (!gateway.confirmReturn) return { status: order.status, pending: true };
+  const config = await readPaymentsConfig(ctx);
+  const credentials = await gatewayCredentials({ readSecret: (name) => readSecret(ctx, name), config, gateway });
+  let result;
+  try {
+    result = await gateway.confirmReturn({ credentials, query: query && typeof query === 'object' ? query : {}, expectedOrderId: order.id, fetchImpl });
+  } catch (error) {
+    throw gatewayErrorToHttp(error);
+  }
+  const paid = (result?.events || []).find((event) => event.type === 'paid' && String(event.orderId) === String(order.id));
+  if (!paid) return { status: order.status, pending: true };
+  await completePaid(ctx, { orderId: order.id, ref: paid.reference, amount: paid.amount, currency: String(paid.currency || '').toLowerCase() });
+  return { status: 'paid' };
+}
+
+/** A verified webhook of any gateway this shop offers (plugin gateways use `webhook/gateway/<id>`). Unverified: 401, nothing applied. */
+export async function applyGatewayWebhook(ctx, { gatewayId, rawBody, headers, fetchImpl }) {
+  const gateway = await shopGateway(gatewayId);
+  const config = await readPaymentsConfig(ctx);
+  const credentials = await gatewayCredentials({ readSecret: (name) => readSecret(ctx, name), config, gateway });
+  let events;
+  try {
+    events = await verifiedWebhookEvents(gateway, { rawBody, headers, credentials, ...(fetchImpl ? { fetchImpl } : {}) });
+  } catch (error) {
+    throw gatewayErrorToHttp(error);
+  }
+  const applied = [];
+  for (const event of events) {
+    if (event.type !== 'paid' || !event.orderId) continue;
+    const order = (await select(ctx, `dev_orders?id=eq.${enc(event.orderId)}&select=provider`, 'service'))[0];
+    if (!order || order.provider !== gateway.id) continue;
+    try {
+      await completePaid(ctx, { orderId: event.orderId, ref: event.reference, amount: event.amount, currency: String(event.currency || '').toLowerCase() });
+      applied.push(event.orderId);
+    } catch (error) {
+      // A verified callback the order refuses (amount short, already used): acknowledged so the gateway stops retrying, and logged.
+      if (!(error instanceof HttpError) || error.status >= 500) throw error;
+      console.warn(`[rwp-developers] a ${gateway.id} payment was acknowledged but not applied: ${error.message}`);
+    }
+  }
+  return { received: true, applied };
 }
 
 /* -------------------------------------------------------------------------------- verification and download */

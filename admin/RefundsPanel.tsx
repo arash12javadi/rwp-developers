@@ -72,7 +72,7 @@ function RefundRow({ row, onDone }: { row: DevRefund; onDone: (message: string) 
   const decide = (approve: boolean) => {
     if (!approve && note.trim().length < 5) { setError('Say why you decline: the buyer reads it, and it is final.'); return; }
     const confirmText = approve
-      ? `Refund ${usd(row.amount)}? ${row.refund_method === 'stripe' ? 'The card is refunded through Stripe now.' : 'You send the USDT back by hand, then record it here.'}`
+      ? `Refund ${usd(row.amount)}? ${row.refund_method && row.refund_method !== 'manual' ? `The payment is refunded through ${row.refund_method === 'stripe' ? 'Stripe' : row.refund_method} now.` : 'You send the money back by hand, then record it here.'}`
       : 'Decline this refund? It is final: the buyer cannot ask again for this order.';
     if (!window.confirm(confirmText)) return;
     void run(approve ? 'approve' : 'decline', async () => {
@@ -95,7 +95,7 @@ function RefundRow({ row, onDone }: { row: DevRefund; onDone: (message: string) 
       </h3>
       <p className={styles.hint}>
         {row.origin === 'owner' ? 'Issued by you' : row.origin === 'gateway' ? 'Made in the Stripe dashboard' : 'Asked by the buyer'} on {when(row.created_at)}
-        {' · '}{row.refund_method === 'stripe' ? 'Card (Stripe)' : 'USDT (NOWPayments): sent by hand'}
+        {' · '}{row.refund_method === 'stripe' ? 'Card (Stripe)' : row.refund_method && row.refund_method !== 'manual' ? `${row.refund_method}: refunded automatically` : 'Sent by hand (USDT or another method)'}
         {order ? ` · order ${usd(order.amount)} on ${when(order.created_at)}` : ''}
       </p>
       {row.reason && <p><strong>Buyer:</strong> {row.reason}</p>}
@@ -119,7 +119,7 @@ function RefundRow({ row, onDone }: { row: DevRefund; onDone: (message: string) 
         </div>
       )}
 
-      {row.status === 'approved' && row.refund_method === 'stripe' && (
+      {row.status === 'approved' && row.refund_method && row.refund_method !== 'manual' && (
         <button type="button" className={styles.button} disabled={busy !== ''} onClick={() => void run('send', async () => { await retryRefund(row.id); return `Refunded ${usd(row.amount)} through Stripe.`; })}>
           {busy === 'send' ? 'Sending…' : 'Send the refund through Stripe'}
         </button>
@@ -128,7 +128,7 @@ function RefundRow({ row, onDone }: { row: DevRefund; onDone: (message: string) 
       {row.status === 'approved' && (
         <form className={styles.row} onSubmit={markPaid}>
           <div className={styles.field} style={{ flex: '1 1 260px' }}>
-            <label htmlFor={`r-${row.id}`}>{row.refund_method === 'stripe' ? 'Refunded it in the Stripe dashboard instead? Its refund id' : 'After you sent it: the transaction hash'}</label>
+            <label htmlFor={`r-${row.id}`}>{row.refund_method && row.refund_method !== 'manual' ? 'Refunded it in the gateway\'s own dashboard instead? Its refund id' : 'After you sent it: the transaction hash or reference'}</label>
             <input id={`r-${row.id}`} className={styles.input} maxLength={300} value={reference} disabled={busy !== ''} onChange={(event) => setReference(event.target.value)} />
           </div>
           <button type="submit" className={`${styles.button} ${styles.ghost}`} disabled={busy !== '' || reference.trim().length < 3}>{busy === 'paid' ? 'Saving…' : 'Mark as refunded'}</button>

@@ -16,6 +16,10 @@ import { newKeyPair } from './license.mjs';
 /** The names a secret may have. A route can only write one of these. */
 export const SECRET_NAMES = ['stripe_secret_key', 'stripe_webhook_secret', 'nowpayments_api_key', 'nowpayments_ipn_secret', 'license_private_key'];
 const WRITABLE_BY_ADMIN = SECRET_NAMES.filter((name) => name !== 'license_private_key');
+/** A field of a payment gateway a plugin added (server/payments/registry.mjs): `gw:<gateway id>:<field name>`. */
+export const GATEWAY_SECRET = /^gw:[a-z][a-z0-9_-]{1,30}:[a-z][a-z0-9_]{1,40}$/;
+const known = (name) => SECRET_NAMES.includes(name) || GATEWAY_SECRET.test(name);
+const writable = (name) => WRITABLE_BY_ADMIN.includes(name) || GATEWAY_SECRET.test(name);
 
 export function requireSecretBox() {
   let enabled = false;
@@ -32,9 +36,15 @@ export async function secretsStatus(ctx) {
   return Object.fromEntries(SECRET_NAMES.map((name) => [name, present.has(name)]));
 }
 
+/** Every stored secret name (never a value), including plugin gateways' fields. */
+export async function storedSecretNames(ctx) {
+  const rows = await select(ctx, 'dev_secrets?select=name', 'service');
+  return new Set(rows.map((row) => row.name));
+}
+
 /** The opened value of one secret, or '' when it is not stored. */
 export async function readSecret(ctx, name) {
-  if (!SECRET_NAMES.includes(name)) throw new HttpError(500, `${name} is not a secret of this plugin.`);
+  if (!known(name)) throw new HttpError(500, `${name} is not a secret of this plugin.`);
   const rows = await select(ctx, `dev_secrets?name=eq.${encodeURIComponent(name)}&select=value`, 'service');
   if (!rows[0]) return '';
   try {
@@ -46,7 +56,7 @@ export async function readSecret(ctx, name) {
 
 /** Seals and stores one credential an administrator pasted. Blank input is ignored by the caller, not stored. */
 export async function writeSecret(ctx, name, value) {
-  if (!WRITABLE_BY_ADMIN.includes(name)) throw new HttpError(400, `${name} cannot be set from here.`);
+  if (!writable(name)) throw new HttpError(400, `${name} cannot be set from here.`);
   const text = String(value || '').trim();
   if (!text || text.length > 400 || /\s/.test(text)) throw new HttpError(400, 'That does not look like an API key (no spaces, at most 400 characters).');
   requireSecretBox();
@@ -54,7 +64,7 @@ export async function writeSecret(ctx, name, value) {
 }
 
 export async function clearSecret(ctx, name) {
-  if (!WRITABLE_BY_ADMIN.includes(name)) throw new HttpError(400, `${name} cannot be removed from here.`);
+  if (!writable(name)) throw new HttpError(400, `${name} cannot be removed from here.`);
   const response = await fetch(`${ctx.supabase.url.replace(/\/$/, '')}/rest/v1/dev_secrets?name=eq.${encodeURIComponent(name)}`, {
     method: 'DELETE',
     headers: { apikey: ctx.supabase.secretKey, Authorization: `Bearer ${ctx.supabase.secretKey}`, Prefer: 'return=minimal' },
