@@ -1,7 +1,7 @@
 {
   "id": "rwp-developers",
   "name": "RWP Developers",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "author": "React-WP",
   "description": "Everything a plugin developer needs on their own site: test a plugin ZIP before installing it, publish plugins (ZIP or GitHub release) to your own Supabase storage, and sell them with your own Stripe or NOWPayments account and your own signed licence keys. Nothing here goes through react-wp.com.",
   "entry": "./index.tsx",
