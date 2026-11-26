@@ -752,6 +752,8 @@ create table if not exists public.dev_listings (
 );
 -- How many buyer complaints about the listing are open on react-wp.com (a count only; the marketplace owner reads them).
 alter table public.dev_listings add column if not exists open_complaints integer not null default 0;
+-- The public GitHub repository last sent with the listing (owner/name), so react-wp.com can follow its releases itself (20261126).
+alter table public.dev_listings add column if not exists sent_repo text not null default '';
 alter table public.dev_listings enable row level security;
 drop policy if exists "Owners read developer listings" on public.dev_listings;
 create policy "Owners read developer listings"

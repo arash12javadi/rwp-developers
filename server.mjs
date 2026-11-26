@@ -25,17 +25,22 @@ import {
 } from './server/store.mjs';
 import { verifySnippet } from './server/license.mjs';
 import { refuseManaged, syncMarketplaceMirror } from './server/marketplaceMirror.mjs';
-import { autoSendListing, listingOverview, sendToMarketplace, stopListing } from './server/listing.mjs';
+import { autoSendListing, autoSendPending, listingOverview, sendToMarketplace, serviceLinkIo, stopListing } from './server/listing.mjs';
 
 /**
  * Looks for new releases of the shop's GitHub-linked plugins (`checkProductReleases`) and sends each new version to its
  * react-wp.com listing, when it has one. Run when the store or the admin is opened, so a release shows on the next visit with
  * nothing pressed. Bounded by `budgetMs` (the rest finishes in the background where the host allows) and never throws.
  */
-async function refreshReleases(ctx, budgetMs) {
+async function refreshReleases(ctx, budgetMs, { allListings = false } = {}) {
   const work = checkProductReleases(ctx)
     .then(async ({ changed }) => {
-      for (const id of changed) await autoSendListing(ctx, id);
+      // The owner's screens also catch up listings sent before (a repository react-wp.com should follow, a missed send).
+      // The account link is read with the server key: whoever opened the page, the send is the shop's own.
+      if (!ctx.supabase.secretKey) return changed.length;
+      const io = serviceLinkIo(ctx);
+      if (allListings) return autoSendPending(ctx, { io });
+      for (const id of changed) await autoSendListing(ctx, id, { io });
       return changed.length;
     })
     .catch(() => 0);
@@ -263,7 +268,7 @@ const developersServer = {
     /* ------------------------------------------------------------------------------------- the owner */
     'GET admin/status': async (ctx) => {
       await requireOwner(ctx);
-      await refreshReleases(ctx, 8000);
+      await refreshReleases(ctx, 8000, { allListings: true });
       const status = await paymentStatus(ctx);
       return {
         status: 200,

@@ -21,10 +21,23 @@ import { storedSecretNames } from './secrets.mjs';
 import { assertReadyToSell, readPaymentsConfig } from './store.mjs';
 
 const enc = encodeURIComponent;
-const LISTING_COLUMNS = 'product_id,requested,sent_version,sent_price,status,message,error,plugin_id,sent_at,checked_at,open_complaints';
+const LISTING_COLUMNS = 'product_id,requested,sent_version,sent_price,sent_repo,status,message,error,plugin_id,sent_at,checked_at,open_complaints';
+
+/**
+ * The repository react-wp.com may follow for a plugin's releases: a free plugin's public GitHub repository (owner/name), else ''.
+ * A private repository (every priced plugin's) is never named: react-wp.com could not read it, and this shop keeps sending those
+ * versions itself.
+ */
+export const followedRepo = (product) => (product?.source_repo && !product.source_private && !(Number(product.price) > 0) ? String(product.source_repo) : '');
 
 /** The account-link settings, read with the owner's own session (RLS decides, as on the Plugins screen). */
 export const linkIo = (ctx) => settingsIo({ supabaseUrl: ctx.supabase.url, supabaseKey: ctx.supabase.publishableKey, accessToken: ctx.bearerToken });
+
+/**
+ * The same settings read with the server's secret key, for sends nobody pressed (a new release found while a visitor opened the store):
+ * a visitor's session may not read the account link. Server-side only, like core's daily licence sync (server/licenseLink.mjs).
+ */
+export const serviceLinkIo = (ctx) => settingsIo({ supabaseUrl: ctx.supabase.url, supabaseKey: ctx.supabase.secretKey, accessToken: ctx.supabase.secretKey });
 
 const asHttp = (error) => (error instanceof LicenseLinkError ? new HttpError(error.status, error.message) : error);
 
@@ -76,9 +89,10 @@ export async function listingOverview(ctx, { io = linkIo(ctx), refresh = false, 
  * does not have the version this shop offers yet. Throws a sentence the owner can act on.
  */
 export async function sendToMarketplace(ctx, { productId, io = linkIo(ctx), fetchImpl } = {}) {
-  const product = (await select(ctx, `dev_products?id=eq.${enc(productId)}&select=id,slug,title,price,status,category,current_version,managed_by`, 'service'))[0];
+  const product = (await select(ctx, `dev_products?id=eq.${enc(productId)}&select=id,slug,title,price,status,category,current_version,managed_by,source_repo,source_private`, 'service'))[0];
   if (!product) throw new HttpError(404, 'That plugin does not exist.');
   if (product.managed_by) throw new HttpError(409, 'This plugin is already managed by the Marketplace.');
+  const repo = followedRepo(product);
   if (product.status !== 'published' || !product.current_version) {
     throw new HttpError(409, 'Put the plugin on sale in your own shop first (with a published version); then send it to the React-WP marketplace.');
   }
@@ -98,6 +112,8 @@ export async function sendToMarketplace(ctx, { productId, io = linkIo(ctx), fetc
   form.append('payment_methods', methods.join(','));
   form.append('license_public_key', String(settings?.license_public_key || ''));
   form.append('category', String(product.category || ''));
+  // react-wp.com links this repository to the listing and looks for new releases there itself (free, public repositories only).
+  if (repo) form.append('source_repo', repo);
   if (sendPackage) {
     const version = (await select(ctx, `dev_versions?product_id=eq.${enc(product.id)}&version=eq.${enc(product.current_version)}&status=eq.published&select=version,storage_path,changelog`, 'service'))[0];
     if (!version) throw new HttpError(409, `Version ${product.current_version} is not published in your shop, so it cannot be sent.`);
@@ -122,6 +138,7 @@ export async function sendToMarketplace(ctx, { productId, io = linkIo(ctx), fetc
     requested: true,
     sent_version: sendPackage ? product.current_version : listing.sent_version,
     sent_price: price,
+    sent_repo: repo,
     status: String(body.listing?.status || (body.verdict === 'rejected' ? 'rejected' : '')),
     message,
     error: '',
@@ -141,10 +158,12 @@ export async function autoSendListing(ctx, productId, { io, fetchImpl } = {}) {
     if (!productId) return { sent: false };
     const listing = await readListing(ctx, productId);
     if (!listing?.requested) return { sent: false };
-    const product = (await select(ctx, `dev_products?id=eq.${enc(productId)}&select=price,status,current_version`, 'service'))[0];
+    const product = (await select(ctx, `dev_products?id=eq.${enc(productId)}&select=price,status,current_version,source_repo,source_private`, 'service'))[0];
     if (!product || product.status !== 'published' || !product.current_version) return { sent: false };
     const priceChanged = listing.sent_price === null || Number(listing.sent_price) !== Number(product.price);
-    if (listing.sent_version === product.current_version && !priceChanged) return { sent: false };
+    // A repository react-wp.com does not know yet (a listing sent before repositories were sent, or a plugin linked since).
+    const repoChanged = followedRepo(product) !== String(listing.sent_repo || '');
+    if (listing.sent_version === product.current_version && !priceChanged && !repoChanged) return { sent: false };
     await sendToMarketplace(ctx, { productId, ...(io ? { io } : {}), ...(fetchImpl ? { fetchImpl } : {}) });
     return { sent: true };
   } catch (error) {
@@ -152,6 +171,17 @@ export async function autoSendListing(ctx, productId, { io, fetchImpl } = {}) {
     await saveListing(ctx, productId, { error: text.slice(0, 1000) }).catch(() => {});
     return { sent: false, error: text };
   }
+}
+
+/** Every requested listing that has something react-wp.com does not have yet (version, price, repository) is sent. Never throws. */
+export async function autoSendPending(ctx, { io, fetchImpl } = {}) {
+  const rows = await select(ctx, 'dev_listings?requested=eq.true&select=product_id', 'service').catch(() => []);
+  let sent = 0;
+  for (const row of rows) {
+    const result = await autoSendListing(ctx, row.product_id, { io, fetchImpl });
+    if (result.sent) sent += 1;
+  }
+  return sent;
 }
 
 /** "Stop sending updates": nothing is sent by itself any more. The listing stays on react-wp.com until its owner removes it. */

@@ -94,6 +94,11 @@ and your own key signs the licence.
 5. After that it is automatic: every **new version** you publish here and every **price change** is sent by itself and goes
    live after react-wp.com's own scan (no new review), until you press **Stop sending updates**. If an automatic send fails,
    your change here still stands and the reason is shown on the plugin; press **Send update now** to retry.
+6. **A free plugin linked to a public GitHub repository** is sent with that repository's name, and react-wp.com links it to the
+   listing (after checking it on GitHub). From then on react-wp.com follows the repository's releases itself, so a new release
+   shows there within minutes even when nobody opens this site. A listing sent before this (20261126) is sent again once, the next
+   time this admin is opened, to add its repository. A plugin for sale comes from a private repository, which react-wp.com cannot
+   read: its new versions are sent by this site (found automatically whenever the store or the admin is opened).
 
 Notes and limits:
 - The plugin id must not be used by someone else's plugin on react-wp.com, and a plugin is listed from one site only.
