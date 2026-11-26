@@ -57,8 +57,10 @@ its screen to the React-WP marketplace: you stay the seller (see below).
    repository: paste a fine-grained GitHub token with read-only "Contents" access to that one repository (it is sealed in your
    database with `RWP_SECRET_BOX_KEY` and never shown again; replace it any time under the plugin's *GitHub release* panel). A free
    plugin from a public repository needs no token. A priced plugin whose repository is public is refused.
-2. Add a **version** from a GitHub release (it is read when you press *Check for new release*, and whenever the screen opens more than
-   six hours after the last look) or by uploading the **ZIP**, with the version equal to `version` in its `manifest.json`. **You choose which
+2. Add a **version** from a GitHub release. After the first one, **new releases are found by themselves**: whenever your store or
+   this admin is opened, each linked plugin not looked at for five minutes is asked for its newest release tag (one GitHub call); a new
+   tag is read, scanned and stored, a clean one becomes the shop's version, and its react-wp.com listing (if any) is updated. *Check for
+   new release* still does it at once or by uploading the **ZIP**, with the version equal to `version` in its `manifest.json`. **You choose which
    source rules** (*Which source rules the live version*, default **the latest GitHub release**): the shop offers the newest published
    version of that source, the other source is kept ready and used only until the chosen source has a version of its own. The package is scanned
    first: a *blocking* finding (no valid manifest, `eval`, a server secret) is never stored; *something to read* (network

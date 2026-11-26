@@ -20,12 +20,27 @@ import {
   buyerRefunds, cancelRefund, decideRefund, issueRefund, markRefunded, ownerRefunds, recordStripeRefunds, requestRefund, retryRefund,
 } from './server/refunds.mjs';
 import {
-  applyGatewayWebhook, claimFree, completePaid, confirmReturn, deleteProduct, downloadForBuyer, downloadForKey, importFromRelease, paymentStatus, readPaymentsConfig,
+  applyGatewayWebhook, checkProductReleases, claimFree, completePaid, confirmReturn, deleteProduct, downloadForBuyer, downloadForKey, importFromRelease, paymentStatus, readPaymentsConfig,
   releaseDomain, saveProduct, savePayments, setVersionStatus, startCheckout, uploadVersion, verifyKey, verifyStoredPackage, MAX_PACKAGE_BYTES,
 } from './server/store.mjs';
 import { verifySnippet } from './server/license.mjs';
 import { refuseManaged, syncMarketplaceMirror } from './server/marketplaceMirror.mjs';
 import { autoSendListing, listingOverview, sendToMarketplace, stopListing } from './server/listing.mjs';
+
+/**
+ * Looks for new releases of the shop's GitHub-linked plugins (`checkProductReleases`) and sends each new version to its
+ * react-wp.com listing, when it has one. Run when the store or the admin is opened, so a release shows on the next visit with
+ * nothing pressed. Bounded by `budgetMs` (the rest finishes in the background where the host allows) and never throws.
+ */
+async function refreshReleases(ctx, budgetMs) {
+  const work = checkProductReleases(ctx)
+    .then(async ({ changed }) => {
+      for (const id of changed) await autoSendListing(ctx, id);
+      return changed.length;
+    })
+    .catch(() => 0);
+  return Promise.race([work, new Promise((resolve) => { setTimeout(() => resolve(0), budgetMs).unref?.(); })]);
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const enc = encodeURIComponent;
@@ -113,6 +128,7 @@ const developersServer = {
   routes: {
     /* ----------------------------------------------------------------------------------------- the store */
     'GET store/catalog': async (ctx) => {
+      await refreshReleases(ctx, 6000);
       const products = (await rpc(ctx, 'dev_store_catalog', {}, 'anon')) || [];
       // Every payment method that is switched on and has its credentials: the built-ins and any a plugin added.
       let methods = [];
@@ -247,6 +263,7 @@ const developersServer = {
     /* ------------------------------------------------------------------------------------- the owner */
     'GET admin/status': async (ctx) => {
       await requireOwner(ctx);
+      await refreshReleases(ctx, 8000);
       const status = await paymentStatus(ctx);
       return {
         status: 200,

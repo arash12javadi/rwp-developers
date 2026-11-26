@@ -14,6 +14,7 @@ import {
   sha256Hex, unpackLimited, versionFromTag,
 } from '../../../server/releaseSource.mjs';
 import { vetFiles } from '../../../server/pluginVet.mjs';
+import { latestReleaseTag } from './releaseProbe.mjs';
 import { isCommercialPlugin } from '../../../src/lib/pluginLicense.js';
 import { isDevEditionPlugin } from '../../../src/lib/pluginEdition.js';
 import { HttpError, deletePackage, insert, readPackage, remove, rpc, select, signedPackageUrl, update, uploadPackage } from './supabase.mjs';
@@ -358,6 +359,43 @@ export async function importFromRelease(ctx, { productId, repositoryUrl, acceptF
     vetExtra: { source: candidate.report.source },
   });
   return { changed: true, product_id: product.id, slug: product.slug, tag: candidate.release.tag, ...stored };
+}
+
+/**
+ * New releases of the plugins linked to a GitHub repository, found without anyone pressing "Check for release": run when the store
+ * or the admin is opened (bounded by the caller). Each plugin not looked at for `staleMs` gets one call for its newest tag; only a
+ * new tag is read, scanned and stored (`importFromRelease`), and a clean one becomes the shop's version at once (findings are held
+ * for the owner, as with the button). Free and paid alike: a private repository is asked with its own sealed token. Returns the
+ * products that got a new version, so the caller can update their marketplace listing. Never throws.
+ */
+export const AUTO_RELEASE_CHECK_MS = 5 * 60 * 1000;
+export async function checkProductReleases(ctx, { staleMs = AUTO_RELEASE_CHECK_MS, max = 5, now = Date.now(), fetchImpl = fetch } = {}) {
+  if (!ctx.supabase?.secretKey) return { checked: 0, changed: [] };
+  const cutoff = new Date(now - staleMs).toISOString();
+  const rows = await select(ctx, 'dev_products?source_repo=like.*/*&managed_by=eq.&status=neq.archived'
+    + `&or=${enc(`(source_checked_at.is.null,source_checked_at.lt.${cutoff})`)}&order=source_checked_at.asc.nullsfirst&limit=${max}`
+    + '&select=id,slug,price,source_repo,source_private,source_last_tag,source_error', 'service').catch(() => []);
+  const changed = [];
+  const touch = (id) => update(ctx, 'dev_products', `id=eq.${enc(id)}`, { source_checked_at: new Date().toISOString() }, 'service').catch(() => {});
+  await Promise.allSettled(rows.map(async (product) => {
+    const privateToken = product.source_private || Number(product.price) > 0 ? await readSourceToken(ctx, product.id).catch(() => '') : '';
+    if (product.source_last_tag && !product.source_error) {
+      try {
+        const tag = await latestReleaseTag(product.source_repo, { token: privateToken, fetchImpl });
+        if (tag && tag === product.source_last_tag) return touch(product.id);
+      } catch (error) {
+        if (error?.code === 'github_rate_limit') return touch(product.id);
+      }
+    }
+    try {
+      const result = await importFromRelease(ctx, { productId: product.id, acceptFindings: false, userId: null, fetchImpl });
+      if (result?.changed) changed.push(product.id);
+    } catch {
+      // importFromRelease recorded the reason on the product (source_error), where the Plugins screen shows it.
+      await touch(product.id);
+    }
+  }));
+  return { checked: rows.length, changed };
 }
 
 /* ------------------------------------------------------------------------------------- orders and licences */
