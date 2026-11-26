@@ -6,7 +6,10 @@ import styles from '../developers.module.css';
 
 const errorText = (error: unknown, fallback: string) => (error instanceof Error && error.message ? error.message : fallback);
 const when = (value: string | null) => (value ? new Date(value).toLocaleString() : '—');
-const PROVIDERS: Record<string, string> = { stripe: 'Stripe', nowpayments: 'NOWPayments', free: 'Free' };
+// Payment methods plugins add are shown by name too; anything else shows its id.
+const PROVIDERS: Record<string, string> = {
+  stripe: 'Stripe', nowpayments: 'NOWPayments', free: 'Free', paypal: 'PayPal', mollie: 'Mollie', gocardless: 'GoCardless',
+};
 
 /** Developers → Sales: every order, and every licence with the two things an owner may do to one. */
 export default function SalesAdmin() {
@@ -50,7 +53,7 @@ export default function SalesAdmin() {
       <h2 className={styles.title}>Sales &amp; licences</h2>
       <p className={styles.subtitle}>
         {paidCount} paid order{paidCount === 1 ? '' : 's'}, ${revenue.toFixed(2)} in total after ${refunded.toFixed(2)} of refunds. Money goes straight to
-        your own Stripe or NOWPayments account; this list is your record of it.
+        your own payment account (Stripe, NOWPayments, PayPal…); this list is your record of it.
       </p>
       {error && <p className={styles.error} role="alert">{error}</p>}
       {message && <p className={styles.notice} role="status">{message}</p>}

@@ -5,6 +5,7 @@ import {
   syncMarketplace, uploadVersion, verifyStored,
 } from '../lib/api';
 import type { DevListing, DevProduct, DevVersion, ImportResult, ListingOverview, UploadResult, VetReportShape } from '../lib/types';
+import { readyToSell } from '../lib/readiness';
 import styles from '../developers.module.css';
 
 const CATEGORIES = ['utility', 'commerce', 'marketing', 'seo', 'media', 'developer', 'integration'];
@@ -28,8 +29,7 @@ function useReadyToSell(): boolean | null {
     adminStatus()
       .then((status) => {
         if (!alive) return;
-        const method = status.checks.stripe.ready || status.checks.nowpayments.ready;
-        setReady(method && Boolean(status.license_public_key));
+        setReady(readyToSell(status));
       })
       .catch(() => { if (alive) setReady(null); });
     return () => { alive = false; };
@@ -442,7 +442,8 @@ function ProductPanel({ product, onChanged, onDeleted, onClose }: { product: Dev
         {needsPayments && (
           <p className={styles.error} role="alert">
             This plugin has a price, but your shop cannot take payments yet. Finish <a href={PAYMENTS_HREF}>Developers → Payments &amp; key</a> first
-            (switch on Stripe or NOWPayments and save its credentials), then put it on sale. A free plugin (price 0) needs nothing.
+            (switch on a payment method, such as Stripe, NOWPayments or PayPal, and save its credentials), then put it on sale. A free
+            plugin (price 0) needs nothing.
           </p>
         )}
         <div className={styles.field}>

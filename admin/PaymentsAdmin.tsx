@@ -99,7 +99,7 @@ export default function PaymentsAdmin() {
     <div className={styles.wrap}>
       <h2 className={styles.title}>Payments &amp; licence key</h2>
       <p className={styles.subtitle}>
-        Your shop takes payments into <strong>your own</strong> Stripe or NOWPayments account. Nothing passes through
+        Your shop takes payments into <strong>your own</strong> account: Stripe, NOWPayments, or a method a plugin adds (PayPal, Mollie, GoCardless with RWP Payments Plus). Nothing passes through
         react-wp.com, and no credential is shown again after it is saved.
       </p>
       {error && <p className={styles.error} role="alert">{error}</p>}
