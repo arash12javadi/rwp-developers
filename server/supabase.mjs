@@ -77,11 +77,21 @@ export async function update(ctx, table, filter, values, auth = 'service') {
     headers: { ...headersFor(ctx, auth), 'Content-Type': 'application/json', Prefer: 'return=representation' },
     body: JSON.stringify(values),
   });
-  if (!response.ok) throw new HttpError(500, `Supabase update of ${table} failed (HTTP ${response.status}).`);
+  if (!response.ok) throw new HttpError(500, `Supabase update of ${table} failed (HTTP ${response.status})${await reason(response)}.`);
   return response.json();
 }
 
 /** Inserts one row and returns it. */
+/**
+ * What the database said about a failed write, for the error sentence: PostgREST's `message` and `code` only. Never
+ * `details`: for a broken constraint it holds the failing row, which can be a sealed credential.
+ */
+async function reason(response) {
+  const payload = await response.json().catch(() => null);
+  if (!payload?.message) return '';
+  return `: ${String(payload.message).slice(0, 300)}${payload.code ? ` (${payload.code})` : ''}`;
+}
+
 export async function insert(ctx, table, values, auth = 'service') {
   const response = await fetch(`${base(ctx)}/rest/v1/${table}`, {
     method: 'POST',
@@ -105,7 +115,7 @@ export async function upsert(ctx, table, row, onConflict, auth = 'service') {
     headers: { ...headersFor(ctx, auth), 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
     body: JSON.stringify(row),
   });
-  if (!response.ok) throw new HttpError(500, `Supabase write to ${table} failed (HTTP ${response.status}).`);
+  if (!response.ok) throw new HttpError(500, `Supabase write to ${table} failed (HTTP ${response.status})${await reason(response)}.`);
 }
 
 export async function remove(ctx, table, filter, auth = 'service') {
@@ -114,7 +124,7 @@ export async function remove(ctx, table, filter, auth = 'service') {
     method: 'DELETE',
     headers: { ...headersFor(ctx, auth), Prefer: 'return=minimal' },
   });
-  if (!response.ok) throw new HttpError(500, `Supabase delete from ${table} failed (HTTP ${response.status}).`);
+  if (!response.ok) throw new HttpError(500, `Supabase delete from ${table} failed (HTTP ${response.status})${await reason(response)}.`);
 }
 
 /** The signed-in user the request carries, verified against Supabase Auth. */

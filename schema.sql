@@ -125,6 +125,11 @@ create table if not exists public.dev_secrets (
   value text not null,
   updated_at timestamptz not null default now()
 );
+-- A payment gateway a plugin adds stores each field as gw:<gateway id>:<field> (server/secrets.mjs GATEWAY_SECRET, 20261125).
+-- The first rule allowed neither ':' nor '-', so saving PayPal, Mollie or GoCardless failed with HTTP 400 (fixed 20261126).
+alter table public.dev_secrets drop constraint if exists dev_secrets_name_check;
+alter table public.dev_secrets add constraint dev_secrets_name_check
+  check (name ~ '^[a-z0-9_]{1,64}$' or name ~ '^gw:[a-z][a-z0-9_-]{1,30}:[a-z][a-z0-9_]{1,40}$');
 
 create or replace function public.dev_touch()
 returns trigger language plpgsql as $$
