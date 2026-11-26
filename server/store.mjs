@@ -24,7 +24,7 @@ import {
 import { expiryDate, expiryStamp, newSerial, signLicenseKey, verifyLicenseKey } from './license.mjs';
 import {
   gatewayChecks, gatewayCredentials, gatewayEnabled, gatewayErrorToHttp, gatewaySecretName, paymentChecks, paymentsConfigFrom,
-  shopGateway, shopGateways, webhookUrl,
+  PROVIDERS, shopGateway, shopGateways, webhookUrl,
 } from './payments.mjs';
 import { announcePayment, checkoutOrder, credentialStatus, verifiedWebhookEvents } from '../../../server/payments/registry.mjs';
 
@@ -86,7 +86,8 @@ export async function assertReadyToSell(ctx) {
  */
 export async function savePayments(ctx, body) {
   // Plugin gateways: `gateways: { <id>: { enabled, fields: { <field>: value } } }`; only gateways the registry offers this shop.
-  const offered = new Map((await shopGateways()).filter((gateway) => !gateway.builtIn).map((gateway) => [gateway.id, gateway]));
+  // Every offered gateway except Stripe and NOWPayments, which keep their own fields (PayPal included, wherever it comes from).
+  const offered = new Map((await shopGateways()).filter((gateway) => !PROVIDERS.includes(gateway.id)).map((gateway) => [gateway.id, gateway]));
   const asked = body?.gateways && typeof body.gateways === 'object' ? body.gateways : {};
   const current = await readPaymentsConfig(ctx);
   const extra = { ...current.gateways };

@@ -5,6 +5,9 @@ import styles from '../developers.module.css';
 
 const errorText = (error: unknown, fallback: string) => (error instanceof Error && error.message ? error.message : fallback);
 
+/** Stripe and NOWPayments have panels of their own; every other gateway (PayPal included, whether core or a plugin adds it) is listed below them. */
+const BUILT_IN_PANELS = ['stripe', 'nowpayments'];
+
 const SECRET_LABELS: Record<string, string> = {
   stripe_secret_key: 'Stripe secret key',
   stripe_webhook_secret: 'Stripe webhook signing secret',
@@ -37,9 +40,9 @@ export default function PaymentsAdmin() {
     setNowOn(next.config.nowpayments.enabled);
     setSandbox(next.config.nowpayments.sandbox);
     setPayCurrency(next.config.nowpayments.pay_currency);
-    setExtraOn(Object.fromEntries((next.gateways || []).filter((gateway) => !gateway.built_in).map((gateway) => [gateway.id, gateway.enabled])));
+    setExtraOn(Object.fromEntries((next.gateways || []).filter((gateway) => !BUILT_IN_PANELS.includes(gateway.id)).map((gateway) => [gateway.id, gateway.enabled])));
   };
-  const extraGateways: GatewayCheck[] = (status?.gateways || []).filter((gateway) => !gateway.built_in);
+  const extraGateways: GatewayCheck[] = (status?.gateways || []).filter((gateway) => !BUILT_IN_PANELS.includes(gateway.id));
 
   useEffect(() => {
     adminStatus().then(apply).catch((loadError: unknown) => setError(errorText(loadError, 'Could not load the payment settings.')));

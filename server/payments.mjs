@@ -74,8 +74,12 @@ const settingsField = (config, gatewayId, field) => {
   return undefined;
 };
 
-/** The gateways this shop may offer: the two built-ins, then active plugins' gateways. */
-export const shopGateways = () => listGateways({ scope: 'developers', builtIns: PROVIDERS });
+/**
+ * The gateways this shop may offer: the two built-ins, then active plugins' gateways. 'paypal' is asked for as a built-in too: a
+ * core from before 20261126 still has PayPal built in, and listGateways skips a built-in id the core does not have, so PayPal comes
+ * from core there and from rwp-payments-plus on a newer core, without depending on one release.
+ */
+export const shopGateways = () => listGateways({ scope: 'developers', builtIns: [...PROVIDERS, 'paypal'] });
 
 export const gatewayEnabled = (config, gatewayId) => (PROVIDERS.includes(gatewayId)
   ? config[gatewayId]?.enabled === true
