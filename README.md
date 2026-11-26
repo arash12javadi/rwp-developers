@@ -38,12 +38,13 @@ its screen to the React-WP marketplace: you stay the seller (see below).
 3. Open **Developers → Payments & key**:
    - **Stripe:** paste the secret key and the webhook signing secret. In Stripe add a webhook endpoint at the address the
      screen shows (`…/api/plugins/rwp-developers/webhook/stripe`) for the events `checkout.session.completed`,
-     `refund.created`, `refund.updated` and `charge.refunded` (the last three record refunds made in the Stripe dashboard).
+     `checkout.session.async_payment_succeeded` (methods that settle later, such as SEPA Direct Debit), `refund.created`, `refund.updated` and `charge.refunded` (the last three record refunds made in the Stripe dashboard).
    - **NOWPayments (USDT):** paste the API key and the IPN secret; set the IPN callback to the address shown. Use the sandbox
      switch while you test.
    - Switch the methods on and save. Credentials are sealed on the server and are never shown again; the screen only says
      whether each is set.
-   - **Other payment methods:** a plugin active on your site can add a payment gateway (see `docs/extending-react-wp.md`). It is
+   - **Other payment methods:** a plugin active on your site can add a payment gateway (see `docs/extending-react-wp.md`). The free
+     **RWP Payments Plus** adds PayPal, Mollie and GoCardless; choose them on its Payment methods screen first. It is
      listed under *More payment methods (added by plugins)*, off until you switch it on and save its fields; its callback
      address is shown there. Refunds go through it when it supports them, else you send them by hand and record them.
 4. Your **licence key pair** is created the first time a method is switched on. The screen shows the public half and a short

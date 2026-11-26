@@ -123,8 +123,10 @@ export default function PaymentsAdmin() {
             </label>
             <div className={styles.row}>{secretField('stripe_secret_key')}{secretField('stripe_webhook_secret')}</div>
             <p className={styles.hint}>
-              In Stripe, add a webhook endpoint at <code>{status.webhook_urls.stripe}</code> for the event
-              <code> checkout.session.completed</code> and paste its signing secret above.
+              In Stripe, add a webhook endpoint at <code>{status.webhook_urls.stripe}</code> for the events
+              <code> checkout.session.completed</code>, <code>checkout.session.async_payment_succeeded</code> (methods that settle
+              later, like SEPA) and the refund events, and paste its signing secret above. Apple Pay, Google Pay, iDEAL and other
+              methods are switched on in Stripe → Settings → Payment methods; PayPal, Mollie and GoCardless come from RWP Payments Plus.
               {status.checks.stripe.enabled && (status.checks.stripe.ready ? ' Ready.' : ` Still missing: ${status.checks.stripe.missing.map((name) => SECRET_LABELS[name]).join(', ')}.`)}
             </p>
           </div>
