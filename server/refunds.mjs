@@ -12,6 +12,7 @@ import { readSecret } from './secrets.mjs';
 import { gatewayCredentials, gatewayErrorToHttp } from './payments.mjs';
 import { readPaymentsConfig } from './store.mjs';
 import { announcePayment, credentialStatus, getGateway } from '../../../server/payments/registry.mjs';
+import { afterRefundSettled } from './platformSync.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const enc = encodeURIComponent;
@@ -84,7 +85,7 @@ export async function cancelRefund(ctx, user, body) {
 export async function decideRefund(ctx, owner, body, { fetchImpl = fetch } = {}) {
   const approve = body?.approve === true;
   const note = text(body?.note);
-  if (!approve && note.length < 5) throw new HttpError(400, 'Say why the refund is declined: the buyer reads this, and the decision is final.');
+  if (!approve && note.length < 10) throw new HttpError(400, 'Say why the refund is declined (at least 10 characters): the buyer reads this, and the decision is final.');
   const row = await rpc(ctx, 'dev_refund_decide', {
     p_refund: uuid(body?.refund_id, 'a request'), p_actor: owner.id, p_approve: approve, p_note: note, p_revoke: body?.revoke === true,
   }, 'service');
@@ -119,7 +120,9 @@ export async function markRefunded(ctx, owner, body) {
     p_refund: uuid(body?.refund_id, 'a request'), p_gateway_refund_id: null, p_payout_reference: reference, p_actor: owner.id,
   }, 'service');
   await announcePayment('refund', { scope: 'developers', refund_id: settled?.id || body?.refund_id, amount: Number(settled?.amount || 0), currency: 'USD', method: 'manual', reference });
-  return { refund: settled, sent: true, method: 'manual' };
+  // The buyer is emailed, and react-wp.com is told when the key was revoked (never throws).
+  const notice = await afterRefundSettled(ctx, settled);
+  return { refund: settled, sent: true, method: 'manual', emailed: notice.emailed };
 }
 
 /**
@@ -156,7 +159,8 @@ export async function sendApproved(ctx, row, owner, { fetchImpl = fetch } = {}) 
   try {
     const settled = await rpc(ctx, 'dev_refund_settle', { p_refund: claimed.id, p_gateway_refund_id: refund.id, p_payout_reference: '', p_actor: owner?.id || null }, 'service');
     await announcePayment('refund', { scope: 'developers', refund_id: claimed.id, order_id: claimed.order_id, amount: Number(claimed.amount), currency: 'USD', method: gateway.id, reference: refund.id });
-    return { refund: settled, sent: true, method: gateway.id, refund_id: refund.id };
+    const notice = await afterRefundSettled(ctx, settled || claimed);
+    return { refund: settled, sent: true, method: gateway.id, refund_id: refund.id, emailed: notice.emailed };
   } catch (error) {
     throw new HttpError(500, `${gateway.label} refunded the payment (refund ${refund.id}), but recording it here failed: ${error instanceof Error ? error.message : 'unknown error'}. Do not refund again: use "Mark as refunded" with that refund id.`);
   }

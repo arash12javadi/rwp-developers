@@ -11,8 +11,9 @@
 </div>
 
 One plugin for people who make plugins. Everything it does happens on **your own site, in your own Supabase project, with
-your own payment accounts**. react-wp.com never takes your money and never sees your payment credentials. The only thing
-ever sent there is a plugin you choose to list on the React-WP marketplace (see *List a plugin on the React-WP marketplace*).
+your own payment accounts**. react-wp.com never takes your money and never sees your payment credentials. What is sent there, over
+your site's own account link and only for plugins you list on the React-WP marketplace: the listing itself, sales of buyers who came
+from react-wp.com (so they appear on the buyer's account), revoked licence serials, and your answers under *Messages*.
 
 | Screen | What it is for |
 |---|---|
@@ -20,6 +21,7 @@ ever sent there is a plugin you choose to list on the React-WP marketplace (see 
 | **Your plugins** | Create plugins, import a GitHub release (the default) or upload versions (ZIP), choose which of the two rules, set a price, put them on sale. |
 | **Sales & licences** | Every order and every licence key; revoke a key, release the site it is bound to; refunds (buyers' requests, and refunding any order). |
 | **Payments & key** | Your Stripe and NOWPayments credentials, your licence public key, your package storage. |
+| **Messages** | Questions, support and refund requests from your buyers on react-wp.com; answer them, approve or decline refunds. |
 | **`/store`** (and `[rwp_developer_store]`) | The public shop: what is on sale, buy or claim, "My purchases" with downloads. |
 
 This plugin is for what you **sell or hand out yourself**. To be found on **react-wp.com/plugins** as well, send a plugin from
@@ -134,8 +136,34 @@ You are the seller, so you decide, and your answer is final.
 - A **full** refund revokes the licence (its key stops verifying and downloading) and marks the order `refunded`; a partial refund keeps
   the licence unless you tick *Also revoke the licence*. After a refund the buyer can buy the plugin again. *Sales & licences* shows the
   total after refunds.
-- The buyer is **not emailed** about refunds (this plugin sends no email); they see the answer on `/store`. Tell them yourself if you
-  want them to know sooner.
+- **The buyer is emailed** when the refund is sent (amount, and whether the key stopped working), through your site's email settings
+  (*Settings → Integrations → Email*; core `sendPluginMail`, so this plugin never sees the mail credentials). Without email set up,
+  they see the answer on `/store` only.
+- A **declined** request needs a reason of at least 10 characters.
+- **A revoked key goes on your signed revocation list** (`GET /api/plugins/rwp-developers/store/revoked`) and, when the plugin is
+  listed on react-wp.com, is pushed there too (at the refund, and again from the admin status if that failed), so it no longer counts
+  as a purchase there either.
+
+### Messages from react-wp.com (Developers → Messages)
+
+When a plugin of yours is listed on react-wp.com, buyers can ask you questions before buying, ask for support, and ask for a refund
+there. **Developers → Messages** lists those conversations (over this site's account link) and lets you answer them. A **refund request**
+is decided here, because the money is on your payment account:
+
+- **Approve refund** finds your own order by the key's serial, refunds it through its gateway (Stripe, PayPal, Mollie, GoCardless) or,
+  for USDT or another method without a refund API, after you type how you sent it back; a full refund revokes the key. The decision is
+  then reported to react-wp.com and the buyer is told.
+- **Decline** needs a written reason. The buyer may then ask the react-wp.com marketplace owner to rule. That ruling is final there: if
+  it says you must refund, the request comes back here as *owner ruled: refund the buyer*, and the listing may be flagged or unlisted if
+  you do not.
+
+### Sales from react-wp.com appear on the buyer's account there
+
+A buyer who presses Buy on react-wp.com while signed in arrives here with `?rwp_ref=…`. The shop keeps that reference with the order
+(`dev_orders.platform_ref`, also across signing in here) and, once the payment is confirmed, reports the sale over the account link, so it
+appears under the buyer's *My purchases* on react-wp.com and on their connected sites. Only the key and the order's amount, currency,
+gateway and bound site are sent; react-wp.com checks the key's signature with your public key. A report that failed is retried when you
+open *Developers*. Without a reference (someone who bought here directly) the buyer can claim the key on react-wp.com instead.
 
 ### Checking a licence in your own plugin
 
@@ -150,6 +178,22 @@ GET  https://your-site/api/plugins/rwp-developers/public-key
 ```
 
 The first successful `verify` binds the key to that site; another site is refused until the buyer (or you) releases it.
+
+A buyer's **connected React-WP site** installs and updates your plugin by itself from your shop:
+
+```
+POST https://your-site/api/plugins/rwp-developers/package   { "license_key": "…", "domain": "buyer-site.com" }
+GET  https://your-site/api/plugins/rwp-developers/store/revoked
+```
+
+`package` answers `{ plugin, version, domain, sha256, exp, sig, url }`: `sig` signs `RWPDPKG1|plugin|version|domain|sha256|exp` with your
+licence key pair (ten minutes), and the buyer's site refuses anything whose signature, host, version or bytes' SHA-256 do not match
+(core `server/developerPackages.mjs`). `store/revoked` is `{ format: "RWPDCRL1", issued_at, serials, signature }`, signed the same way.
+
+**Priced plugins are protected for buyers.** A buyer's download (from *My purchases*, `download` or `package`) of a plugin with a
+price is compiled, obfuscated and watermarked with the licence serial (core `protectPluginZip`), built once per licence and version and
+stored under `protected/` in your private bucket. Free plugins go out as published. You keep your readable source in your repository and
+in the stored master.
 
 ## For the people who buy from you (Client)
 
@@ -185,6 +229,9 @@ the licence.
 - **Refunds are built in (see *Refunds*); chargebacks are not.** A card dispute is handled in Stripe; revoke the licence here yourself.
   USDT refunds are sent by hand (no NOWPayments refund API).
 - **Taxes, invoices and payouts are yours**: this plugin records orders, it does not file anything for you.
+- The protected copy is built on the first download of each licence and version, which can take several seconds on a large plugin.
+- A buyer's site binds a key to its host (`buyer-site.com`); a key first bound by a browser download to `https://buyer-site.com` is a
+  different string, so release it once if the site's own install is refused.
 - **Upload size:** a Vercel function accepts about 4.5 MB per request, so a larger ZIP has to come from a **GitHub release**
   (the server downloads it, up to 40 MB). A self-hosted `npm start` site has no such limit below 40 MB.
 - **A licence check inside a plugin can be removed by a buyer who edits the plugin's code.** The signature stops anyone from
@@ -195,6 +242,9 @@ the licence.
 ## For maintainers
 
 - `schema.sql` / `uninstall.sql`: `dev_products`, `dev_versions`, `dev_orders`, `dev_licenses`, `dev_refunds`, `dev_settings`, `dev_secrets`.
+  20261127: `dev_orders.platform_ref` / `platform_reported_at` / `platform_error`, `dev_licenses.revoke_reason` / `platform_revoked_at`,
+  trigger `dev_licenses_revoked_at`. `server/platformSync.mjs`: purchase reports, the revocation list and its push, refund emails,
+  Messages, protected and signed delivery.
   Refunds: `dev_refund_open` / `_cancel` / `_decide` / `_issue` / `_claim` / `_release` / `_settle` / `_from_gateway`, all
   service-role only (`server/refunds.mjs` checks the session or `manage_options` first); `dev_refunds` has RLS on, no policy, and no
   browser grants.

@@ -763,4 +763,32 @@ revoke all on public.dev_listings from anon;
 revoke insert, update, delete on public.dev_listings from authenticated;
 grant all on public.dev_listings to service_role;
 
+-- 20261127: the order's link to the buyer's react-wp.com account, revocation details, and protected deliveries.
+--   platform_ref          the one-time buyer reference react-wp.com put in the checkout address (`?rwp_ref=`), kept until the sale
+--                         is reported; the purchase then shows under the buyer's My purchases on react-wp.com
+--   platform_reported_at  when react-wp.com accepted the report; platform_error the last refusal, retried from the admin status
+alter table public.dev_orders add column if not exists platform_ref text not null default '';
+alter table public.dev_orders drop constraint if exists dev_orders_platform_ref_check;
+alter table public.dev_orders add constraint dev_orders_platform_ref_check check (char_length(platform_ref) <= 100 and platform_ref ~ '^[A-Za-z0-9_-]*$');
+alter table public.dev_orders add column if not exists platform_reported_at timestamptz;
+alter table public.dev_orders add column if not exists platform_error text not null default '';
+-- Why a licence was revoked (refund, abuse) and whether react-wp.com was told; the signed list at GET store/revoked is the record.
+alter table public.dev_licenses add column if not exists revoke_reason text not null default '';
+alter table public.dev_licenses drop constraint if exists dev_licenses_revoke_reason_check;
+alter table public.dev_licenses add constraint dev_licenses_revoke_reason_check check (char_length(revoke_reason) <= 300);
+alter table public.dev_licenses add column if not exists platform_revoked_at timestamptz;
+-- A revoked licence always has its moment.
+create or replace function public.dev_licenses_revoked_at()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if new.status = 'revoked' and new.revoked_at is null then new.revoked_at := now(); end if;
+  return new;
+end;
+$$;
+revoke execute on function public.dev_licenses_revoked_at() from public, anon, authenticated;
+drop trigger if exists dev_licenses_revoked_at on public.dev_licenses;
+create trigger dev_licenses_revoked_at before update of status on public.dev_licenses
+  for each row execute function public.dev_licenses_revoked_at();
+create index if not exists dev_licenses_revoked_idx on public.dev_licenses(status) where status = 'revoked';
+
 notify pgrst, 'reload schema';

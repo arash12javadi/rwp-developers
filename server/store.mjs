@@ -28,6 +28,7 @@ import {
   PROVIDERS, shopGateway, shopGateways, webhookUrl,
 } from './payments.mjs';
 import { announcePayment, checkoutOrder, credentialStatus, verifiedWebhookEvents } from '../../../server/payments/registry.mjs';
+import { buyerCopy, rememberRef, reportPurchase, signedPackage } from './platformSync.mjs';
 
 const enc = encodeURIComponent;
 export const MAX_PACKAGE_BYTES = 40 * 1024 * 1024;
@@ -420,18 +421,21 @@ export async function completePaid(ctx, { orderId, ref, amount, currency }) {
   // After SQL accepted it, once (a repeated callback returns the same licence with repeat: true).
   if (!result?.repeat) {
     await announcePayment('complete', { scope: 'developers', gateway: order.provider, order_id: order.id, amount: Number(amount ?? 0), currency: String(currency || 'usd').toUpperCase(), reference: ref || '', plugin: product.slug });
+    // A buyer who came from react-wp.com gets the purchase on their account there (never throws; retried from the admin status).
+    await reportPurchase(ctx, order.id);
   }
   return result;
 }
 
-export async function claimFree(ctx, user, productId) {
+export async function claimFree(ctx, user, productId, { platformRef = '' } = {}) {
   const order = await rpc(ctx, 'dev_place_order', { p_product: productId, p_user: user.id, p_provider: 'free' }, 'service');
   if (Number(order.amount) !== 0) throw new HttpError(400, 'This plugin is not free.');
+  await rememberRef(ctx, order.order_id, platformRef);
   return completePaid(ctx, { orderId: order.order_id, ref: '', amount: 0, currency: 'usd' });
 }
 
 /** Opens a payment for a product. The browser sent a product id and a provider name; everything else is read here. */
-export async function startCheckout(ctx, user, { productId, provider, fetchImpl = fetch }) {
+export async function startCheckout(ctx, user, { productId, provider, platformRef = '', fetchImpl = fetch }) {
   const gateway = await shopGateway(provider);
   const config = await readPaymentsConfig(ctx);
   if (!gatewayEnabled(config, gateway.id)) throw new HttpError(409, `${gateway.label} is not available in this shop.`);
@@ -442,6 +446,8 @@ export async function startCheckout(ctx, user, { productId, provider, fetchImpl 
   }
   // The price is read in SQL from the product; the gateway is only handed the order's own amount.
   const order = await rpc(ctx, 'dev_place_order', { p_product: productId, p_user: user.id, p_provider: gateway.id }, 'service');
+  // The buyer pressed Buy on react-wp.com: the reference stays with the order until the paid sale is reported there.
+  await rememberRef(ctx, order.order_id, platformRef);
   const success = `${ctx.origin}/store?order=${order.order_id}&paid=1&gateway=${encodeURIComponent(gateway.id)}`;
   const cancel = `${ctx.origin}/store?cancelled=1`;
   try {
@@ -529,19 +535,57 @@ export async function verifyKey(ctx, { key, domain }) {
 }
 
 async function packageFor(ctx, slug) {
-  const product = (await select(ctx, `dev_products?slug=eq.${enc(slug)}&select=id,slug,current_version,status`, 'service'))[0];
+  const product = (await select(ctx, `dev_products?slug=eq.${enc(slug)}&select=id,slug,title,price,current_version,status`, 'service'))[0];
   if (!product || !product.current_version) throw new HttpError(404, 'This plugin has no package to download right now.');
-  const version = (await select(ctx, `dev_versions?product_id=eq.${enc(product.id)}&version=eq.${enc(product.current_version)}&status=eq.published&select=storage_path,sha256,size`, 'service'))[0];
+  const version = (await select(ctx, `dev_versions?product_id=eq.${enc(product.id)}&version=eq.${enc(product.current_version)}&status=eq.published&select=version,storage_path,sha256,size`, 'service'))[0];
   if (!version) throw new HttpError(404, 'This plugin has no package to download right now.');
-  return { product, version, url: await signedPackageUrl(ctx, version.storage_path, 600) };
+  return { product, version };
 }
+
+/**
+ * The copy one licence downloads: a priced plugin compiled, obfuscated and watermarked with the licence serial
+ * (`buyerCopy` in server/platformSync.mjs), a free one as published. The developer keeps their readable source.
+ */
+async function deliveredCopy(ctx, found, licenseId) {
+  const license = (await select(ctx, `dev_licenses?id=eq.${enc(licenseId)}&select=id,serial`, 'service'))[0];
+  if (!license) throw new HttpError(404, 'That licence does not exist.');
+  const copy = await buyerCopy(ctx, { product: found.product, version: found.version, license });
+  return { ...copy, url: await signedPackageUrl(ctx, copy.path, 600) };
+}
+
+/** The host of a site address (`https://example.com/x` -> `example.com`), lower case, or ''. */
+export const siteHost = (value) => {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  try {
+    return new URL(/^https?:\/\//.test(raw) ? raw : `https://${raw}`).host;
+  } catch {
+    return '';
+  }
+};
 
 /** A download for a site that presents a licence key. */
 export async function downloadForKey(ctx, { key, domain }) {
   const verdict = await verifyKey(ctx, { key, domain });
   if (!verdict?.valid) throw new HttpError(403, DOWNLOAD_REASONS[verdict?.reason] || 'This licence key cannot download the plugin.');
   const found = await packageFor(ctx, verdict.plugin);
-  return { plugin: found.product.slug, version: found.product.current_version, sha256: found.version.sha256, size: Number(found.version.size) || 0, download_url: found.url, expires_in: 600 };
+  const copy = await deliveredCopy(ctx, found, verdict.license_id);
+  return { plugin: found.product.slug, version: found.product.current_version, sha256: copy.sha256, size: copy.size, download_url: copy.url, expires_in: 600 };
+}
+
+/**
+ * For a buyer's site that installs or updates the plugin by itself (core `server/developerPackages.mjs`): the licence must
+ * verify for that site's host (the first request binds it, as any download does), and the answer is signed with this shop's
+ * licence key pair over plugin, version, host, sha256 and a ten-minute expiry, so the site can prove the bytes are this shop's.
+ */
+export async function packageForSite(ctx, { key, domain }) {
+  const host = siteHost(domain);
+  if (!host) throw new HttpError(400, 'Send the address of the site the plugin is for.');
+  const verdict = await verifyKey(ctx, { key, domain: host });
+  if (!verdict?.valid) throw new HttpError(403, DOWNLOAD_REASONS[verdict?.reason] || 'This licence key cannot download the plugin.');
+  const found = await packageFor(ctx, verdict.plugin);
+  const license = (await select(ctx, `dev_licenses?id=eq.${enc(verdict.license_id)}&select=id,serial`, 'service'))[0];
+  return signedPackage(ctx, { product: found.product, version: found.version, license, domain: host });
 }
 
 export const DOWNLOAD_REASONS = {
@@ -559,7 +603,8 @@ export async function downloadForBuyer(ctx, user, licenseId) {
   if (license.expires_at && Date.parse(license.expires_at) <= Date.now()) throw new HttpError(403, DOWNLOAD_REASONS.expired);
   const product = (await select(ctx, `dev_products?id=eq.${enc(license.product_id)}&select=slug`, 'service'))[0];
   const found = await packageFor(ctx, product.slug);
-  return { plugin: found.product.slug, version: found.product.current_version, sha256: found.version.sha256, download_url: found.url, expires_in: 600 };
+  const copy = await deliveredCopy(ctx, found, license.id);
+  return { plugin: found.product.slug, version: found.product.current_version, sha256: copy.sha256, download_url: copy.url, expires_in: 600 };
 }
 
 /** A buyer may free the site a licence is bound to (to move it). The owner can do the same from the admin. */

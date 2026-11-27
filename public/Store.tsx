@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { getSupabaseClient } from '../../../src/lib/db';
 import {
-  askForRefund, claimPlugin, confirmCheckout, downloadMine, loadStore, myLicenses, myRefunds, releaseMyDomain, startCheckout, withdrawRefund,
+  askForRefund, claimPlugin, confirmCheckout, downloadMine, forgetPlatformRef, loadStore, myLicenses, myRefunds, platformRef, releaseMyDomain, startCheckout,
+  withdrawRefund,
 } from '../lib/api';
 import type { DevRefund, DevRefundStatus, MyLicense, StoreCatalog, StoreProduct } from '../lib/types';
 import styles from '../developers.module.css';
@@ -56,6 +57,11 @@ export default function Store({ title = 'Plugins', intro = '' }: { title?: strin
     // Refund requests are a convenience on top of the list: if they cannot be read, the licences still show.
     try { setRefunds(await myRefunds()); } catch { setRefunds([]); }
   }, []);
+
+  // A buyer sent by react-wp.com carries `?rwp_ref=`: kept for this tab (signing in here must not lose it), sent with the order so
+  // the paid sale is added to the buyer's react-wp.com account, and forgotten once they are back from paying.
+  const linkedToPlatform = Boolean(platformRef());
+  useEffect(() => { if (returned) forgetPlatformRef(); }, [returned]);
 
   useEffect(() => {
     loadStore().then(setCatalog).catch((loadError: unknown) => { setCatalog({ products: [], methods: [] }); setError(errorText(loadError, 'The shop could not be loaded.')); });
@@ -135,6 +141,9 @@ export default function Store({ title = 'Plugins', intro = '' }: { title?: strin
       {error && <p className={styles.error} role="alert">{error}</p>}
       {message && <p className={styles.notice} role="status">{message}</p>}
       {catalog && wanted && !focused && <p className={styles.hint} role="status">The plugin you were looking for is not on sale here right now.</p>}
+      {linkedToPlatform && !returned && (
+        <p className={styles.hint}>You came from react-wp.com: once paid, this purchase also appears under My purchases on your react-wp.com account.</p>
+      )}
 
       {!catalog ? <p className={styles.muted}>Loading…</p> : !products.length ? <p className={styles.hint}>Nothing is for sale yet.</p> : (
         <ul className={styles.cards}>

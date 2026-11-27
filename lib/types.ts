@@ -194,3 +194,28 @@ export interface PaymentSettingsInput {
 
 export interface UploadResult { version: string; status: string; current: boolean; held: boolean; severity: 'clean' | 'advisory' | 'critical'; report: VetReportShape; sha256: string }
 export interface ImportResult extends Partial<UploadResult> { changed: boolean; message?: string; slug?: string; tag?: string; product_id?: string }
+
+/** A conversation react-wp.com holds about one of this shop's plugins (Developers → Messages). */
+export interface InboxTicket {
+  id: string;
+  kind: 'presale' | 'support' | 'refund';
+  subject: string;
+  status: 'open' | 'answered' | 'closed';
+  refund_status: 'none' | 'requested' | 'approved' | 'declined' | 'escalated' | 'ruled_buyer' | 'ruled_seller' | 'cancelled';
+  refund_amount: number | null;
+  decision_reason: string;
+  last_message_at: string;
+  plugin_title: string;
+  plugin_slug: string;
+  buyer_name: string;
+}
+
+export interface InboxThread {
+  role: 'seller';
+  ticket: InboxTicket;
+  messages: Array<{ id: string; author_role: 'buyer' | 'seller' | 'owner' | 'system'; body: string; created_at: string }>;
+  purchase: { license_serial: string; amount: number; currency: string; status: string; created_at: string } | null;
+  dispute: { status: 'open' | 'ruled'; ruling: string | null; ruling_note: string } | null;
+  /** The order and licence of this shop the refund is about, when they were found here by the key's serial. */
+  local: { license: { id: string; status: string; domain: string | null }; order: { id: string; provider: string; amount: number; refunded_amount: number; currency: string; status: string } | null } | null;
+}

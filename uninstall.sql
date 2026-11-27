@@ -27,3 +27,4 @@ drop function if exists public.dev_refund_release(uuid, text);
 drop function if exists public.dev_refund_settle(uuid, text, text, uuid);
 drop function if exists public.dev_refund_from_gateway(text, text, numeric, uuid);
 drop function if exists public.dev_touch();
+drop function if exists public.dev_licenses_revoked_at();

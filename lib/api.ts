@@ -1,7 +1,7 @@
 import { describeDbError, getSupabaseClient } from '../../../src/lib/db';
 import type {
   DevLicense, DevOrder, DevProduct, DevRefund, DevRefundResult, DevVersion, ImportResult, ListingOverview, ListingSendResult, MyLicense,
-  PaymentSettingsInput, PaymentStatus, StoreCatalog, UploadResult,
+  PaymentSettingsInput, PaymentStatus, StoreCatalog, UploadResult, InboxTicket, InboxThread,
 } from './types';
 
 const ROUTES = '/api/plugins/rwp-developers';
@@ -38,12 +38,39 @@ const post = <T>(route: string, body: Record<string, unknown> = {}) => request<T
 const get = <T>(route: string) => request<T>(route, 'GET');
 
 /* --------------------------------------------------------------------------------------------- the store */
+
+const REF_KEY = 'rwp_platform_ref';
+const REF = /^[A-Za-z0-9_-]{16,100}$/;
+
+/**
+ * The react-wp.com buyer reference a buyer arrived with (`?rwp_ref=`, made by react-wp.com when a signed-in buyer pressed Buy there).
+ * Kept for this browser tab, so signing in here on the way does not lose it. Sent with the order, so this shop can report the paid
+ * sale back to the buyer's react-wp.com account. It is not a credential: react-wp.com accepts it once, for that plugin, from this shop.
+ */
+export const platformRef = (): string => {
+  if (typeof window === 'undefined') return '';
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get('rwp_ref') || '';
+    if (REF.test(fromUrl)) {
+      window.sessionStorage.setItem(REF_KEY, fromUrl);
+      return fromUrl;
+    }
+    const kept = window.sessionStorage.getItem(REF_KEY) || '';
+    return REF.test(kept) ? kept : '';
+  } catch {
+    return '';
+  }
+};
+export const forgetPlatformRef = () => {
+  try { window.sessionStorage.removeItem(REF_KEY); } catch { /* storage unavailable */ }
+};
 export const loadStore = () => get<StoreCatalog>('store/catalog');
-export const claimPlugin = (productId: string) => post<{ license_key: string }>('claim', { product_id: productId });
+export const claimPlugin = (productId: string) => post<{ license_key: string }>('claim', { product_id: productId, platform_ref: platformRef() || undefined });
 /** Back from a gateway that confirms on return: the server reads the payment from the gateway. */
 export const confirmCheckout = (orderId: string, gateway: string, query: Record<string, string>) =>
   post<{ status: string; pending?: boolean }>('checkout/return', { order_id: orderId, gateway, query });
-export const startCheckout = (productId: string, provider: string) => post<{ url: string }>('checkout/start', { product_id: productId, provider });
+export const startCheckout = (productId: string, provider: string) =>
+  post<{ url: string }>('checkout/start', { product_id: productId, provider, platform_ref: platformRef() || undefined });
 export const myLicenses = () => get<{ licenses: MyLicense[] }>('my/licenses').then((answer) => answer.licenses);
 export const downloadMine = (licenseId: string) => post<{ download_url: string; version: string; sha256: string }>('my/download', { license_id: licenseId });
 export const releaseMyDomain = (licenseId: string) => post<{ released: boolean }>('my/release-domain', { license_id: licenseId });
@@ -65,6 +92,13 @@ export const markRefundPaid = (refundId: string, payoutReference: string) =>
 
 /* -------------------------------------------------------------------------------------------- the owner */
 export const adminStatus = () => get<PaymentStatus>('admin/status');
+
+/* -------------------------------------------------------------- messages from react-wp.com (the shop's inbox) */
+export const inboxList = () => get<{ tickets: InboxTicket[] }>('admin/inbox');
+export const inboxThread = (ticketId: string) => post<InboxThread>('admin/inbox/thread', { ticket_id: ticketId });
+export const inboxReply = (ticketId: string, message: string) => post<InboxThread>('admin/inbox/reply', { ticket_id: ticketId, message });
+export const inboxDecide = (input: { ticket_id: string; decision: 'approve' | 'decline'; reason: string; amount?: number | null; manual?: boolean; payout_reference?: string }) =>
+  post<{ sent?: boolean; reported?: boolean; message?: string }>('admin/inbox/decide', input);
 export const savePayments = (input: PaymentSettingsInput) => post<PaymentStatus>('admin/payments/save', input as unknown as Record<string, unknown>);
 /** Copies the owner's marketplace plugins into this list. Answers `available: false` when the marketplace is not installed. */
 export const syncMarketplace = () => post<{ available: boolean; created: number; updated: number; archived: number; errors: string[] }>('admin/marketplace/sync');

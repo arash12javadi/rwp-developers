@@ -10,8 +10,11 @@ import manifest from './manifest.json';
  *   - Plugins: publish them (ZIP upload or a GitHub release) into your own private Supabase storage.
  *   - Sales / Payments: sell them with your own Stripe or NOWPayments account and licence keys signed with your own key.
  *
- * Nothing here talks to react-wp.com. The admin screens are lazy chunks, so a visitor to the public site downloads none of
- * them, and the shop at /store (or the [rwp_developer_store] shortcode) is its own small chunk.
+ *   - Messages: buyers' questions, support and refund requests from react-wp.com, answered and decided here.
+ *
+ * The only calls to react-wp.com go over the site's own account link (opt-in): the marketplace listing, sales reported to a
+ * buyer's react-wp.com account, revoked keys, and Messages. The admin screens are lazy chunks, so a visitor to the public site
+ * downloads none of them, and the shop at /store (or the [rwp_developer_store] shortcode) is its own small chunk.
  */
 
 const DevelopersAdmin = lazy(() => import('./admin/DevelopersAdmin'));
@@ -36,6 +39,7 @@ export const developersCleanup = defineRwpPlugin(manifest, ({ admin, routes, sho
         { id: 'check', label: 'Plugin Check', icon: '🛡️' },
         { id: 'sales', label: 'Sales & licences', icon: '💳' },
         { id: 'payments', label: 'Payments & key', icon: '⚙️' },
+        { id: 'messages', label: 'Messages', icon: '💬' },
       ],
     }),
     routes.register({ path: '/store', component: () => <Suspense fallback={loading}><Store /></Suspense> }),

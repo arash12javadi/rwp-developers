@@ -3,6 +3,7 @@ import type { RwpAdminPageProps } from '../../../src/lib/plugin-api';
 import ProductsAdmin from './ProductsAdmin';
 import SalesAdmin from './SalesAdmin';
 import PaymentsAdmin from './PaymentsAdmin';
+import InboxAdmin from './InboxAdmin';
 
 // Plugin Check carries the name tables and, when a check runs, the TypeScript compiler, so it is its own chunk.
 const PluginCheckAdmin = lazy(() => import('../check/admin/PluginCheckAdmin'));
@@ -15,5 +16,6 @@ export default function DevelopersAdmin(props: RwpAdminPageProps) {
   }
   if (section === 'sales') return <SalesAdmin />;
   if (section === 'payments') return <PaymentsAdmin />;
+  if (section === 'messages') return <InboxAdmin />;
   return <ProductsAdmin />;
 }

@@ -21,8 +21,9 @@ import {
 } from './server/refunds.mjs';
 import {
   applyGatewayWebhook, checkProductReleases, claimFree, completePaid, confirmReturn, deleteProduct, downloadForBuyer, downloadForKey, importFromRelease, paymentStatus, readPaymentsConfig,
-  releaseDomain, saveProduct, savePayments, setVersionStatus, startCheckout, uploadVersion, verifyKey, verifyStoredPackage, MAX_PACKAGE_BYTES,
+  packageForSite, releaseDomain, saveProduct, savePayments, setVersionStatus, startCheckout, uploadVersion, verifyKey, verifyStoredPackage, MAX_PACKAGE_BYTES,
 } from './server/store.mjs';
+import { cleanRef, inboxDecide, inboxList, inboxReply, inboxThread, pushRevocations, reportPendingPurchases, signedRevocationList } from './server/platformSync.mjs';
 import { verifySnippet } from './server/license.mjs';
 import { refuseManaged, syncMarketplaceMirror } from './server/marketplaceMirror.mjs';
 import { autoSendListing, autoSendPending, listingOverview, sendToMarketplace, serviceLinkIo, stopListing } from './server/listing.mjs';
@@ -129,7 +130,8 @@ const webhookOutcome = async (run) => {
 const developersServer = {
   id: 'rwp-developers',
   // A buyer's own site calls verify/download from its server or browser with only a licence key.
-  cors: ['POST verify', 'POST download', 'GET public-key'],
+  // `GET store/revoked` is the signed revocation list react-wp.com and buyers' sites read; `POST package` is called server to server.
+  cors: ['POST verify', 'POST download', 'GET public-key', 'GET store/revoked'],
   routes: {
     /* ----------------------------------------------------------------------------------------- the store */
     'GET store/catalog': async (ctx) => {
@@ -150,14 +152,14 @@ const developersServer = {
 
     'POST claim': async (ctx) => {
       const user = await signedIn(ctx);
-      const result = await claimFree(ctx, user, isUuid(ctx.json()?.product_id));
+      const result = await claimFree(ctx, user, isUuid(ctx.json()?.product_id), { platformRef: cleanRef(ctx.json()?.platform_ref) });
       return { status: 200, body: { license_key: result.license_key } };
     },
 
     'POST checkout/start': async (ctx) => {
       const user = await signedIn(ctx);
       const body = ctx.json() || {};
-      const result = await startCheckout(ctx, user, { productId: isUuid(body.product_id), provider: String(body.provider || '') });
+      const result = await startCheckout(ctx, user, { productId: isUuid(body.product_id), provider: String(body.provider || ''), platformRef: cleanRef(body.platform_ref) });
       return { status: 200, body: { url: result.url } };
     },
 
@@ -199,6 +201,12 @@ const developersServer = {
       return { status: 200, body: await cancelRefund(ctx, user, ctx.json() || {}) };
     },
 
+    // The signed list of every revoked licence serial of this shop (RWPDCRL1, server/platformSync.mjs). Public: serials only.
+    'GET store/revoked': async (ctx) => {
+      if (rateLimited(ctx, 'revoked', 60)) throw tooMany();
+      return { status: 200, body: await signedRevocationList(ctx), headers: { 'Cache-Control': 'public, max-age=60' } };
+    },
+
     /* ------------------------------------------------------------------ licence check for a buyer's site */
     'GET public-key': async (ctx) => {
       if (rateLimited(ctx, 'public-key')) throw tooMany();
@@ -218,6 +226,15 @@ const developersServer = {
       if (!String(body.license_key || '').trim()) throw new HttpError(400, 'Send the licence key.');
       if (!String(body.domain || '').trim()) throw new HttpError(400, 'Send the address of the site the plugin is for (its domain).');
       return { status: 200, body: await downloadForKey(ctx, { key: body.license_key, domain: body.domain }) };
+    },
+
+    // A buyer's site installs or updates the plugin by itself: a signed description of the package for that site's host
+    // (RWPDPKG1, the shop's licence key pair). A priced plugin is the buyer's protected, watermarked copy.
+    'POST package': async (ctx) => {
+      if (rateLimited(ctx, 'package', 20)) throw tooMany();
+      const body = ctx.json() || {};
+      if (!String(body.license_key || '').trim()) throw new HttpError(400, 'Send the licence key.');
+      return { status: 200, body: await packageForSite(ctx, { key: body.license_key, domain: body.domain }), headers: { 'Cache-Control': 'no-store' } };
     },
 
     /* ---------------------------------------------------------------------------------------- webhooks */
@@ -269,6 +286,13 @@ const developersServer = {
     'GET admin/status': async (ctx) => {
       await requireOwner(ctx);
       await refreshReleases(ctx, 8000, { allListings: true });
+      // Catch up with react-wp.com: sales still to report to buyers' accounts, revoked keys it was not told about yet.
+      if (ctx.supabase.secretKey) {
+        await Promise.race([
+          Promise.all([reportPendingPurchases(ctx).catch(() => 0), pushRevocations(ctx).catch(() => null)]),
+          new Promise((resolve) => { setTimeout(resolve, 6000).unref?.(); }),
+        ]);
+      }
       const status = await paymentStatus(ctx);
       return {
         status: 200,
@@ -299,6 +323,25 @@ const developersServer = {
     'POST admin/refunds/mark-paid': async (ctx) => {
       await requireOwner(ctx);
       return { status: 200, body: await markRefunded(ctx, await signedIn(ctx), ctx.json() || {}) };
+    },
+
+    // Messages from react-wp.com about this shop's plugins: pre-sale questions, support and refund requests (server/platformSync.mjs).
+    'GET admin/inbox': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await inboxList(ctx) };
+    },
+    'POST admin/inbox/thread': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await inboxThread(ctx, ctx.json()?.ticket_id) };
+    },
+    'POST admin/inbox/reply': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await inboxReply(ctx, ctx.json()?.ticket_id, ctx.json()?.message) };
+    },
+    'POST admin/inbox/decide': async (ctx) => {
+      await requireOwner(ctx);
+      const owner = await signedIn(ctx);
+      return { status: 200, body: await inboxDecide(ctx, owner, ctx.json() || {}, { refund: (input) => issueRefund(ctx, owner, input) }) };
     },
 
     'POST admin/payments/save': async (ctx) => {
