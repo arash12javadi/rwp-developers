@@ -183,11 +183,15 @@ against the buyer's 5. A **refund request** is decided here, because the money i
 
 ### Sales from react-wp.com appear on the buyer's account there
 
-A buyer who presses Buy on react-wp.com while signed in arrives here with `?rwp_ref=…`. The shop keeps that reference with the order
-(`dev_orders.platform_ref`, also across signing in here) and, once the payment is confirmed, reports the sale over the account link, so it
-appears under the buyer's *My purchases* on react-wp.com and on their connected sites. Only the key and the order's amount, currency,
-gateway and bound site are sent; react-wp.com checks the key's signature with your public key. A report that failed is retried when you
-open *Developers*. Without a reference (someone who bought here directly) the buyer can claim the key on react-wp.com instead.
+Every paid sale of a plugin you listed on react-wp.com is reported there once the payment is confirmed (20261128; before, only sales
+that started with Buy on react-wp.com were), so it appears under the buyer's *My purchases* on react-wp.com and on their connected sites.
+The buyer is found by the one-time reference a buyer who pressed Buy there arrives with (`?rwp_ref=…`, kept with the order in
+`dev_orders.platform_ref`, also across signing in here), or else by a **sha256 of the buyer's email address as this site's sign-in
+confirmed it** (never the editable profile field, and never the address itself): react-wp.com matches it only to the one confirmed
+account there with the same address. Also sent: the key, the order's amount, currency, gateway, payment date and bound site;
+react-wp.com checks the key's signature with your public key. A report that failed is retried when you open *Developers*, which is also
+what reports sales made before 20261128. *Sales → Orders* says for each order whether it is on the buyer's react-wp.com account; when
+no account there has that address, the buyer can claim the key there instead (Dashboard → My purchases → Claim licence key).
 
 ### Checking a licence in your own plugin
 

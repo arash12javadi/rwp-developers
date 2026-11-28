@@ -421,7 +421,8 @@ export async function completePaid(ctx, { orderId, ref, amount, currency }) {
   // After SQL accepted it, once (a repeated callback returns the same licence with repeat: true).
   if (!result?.repeat) {
     await announcePayment('complete', { scope: 'developers', gateway: order.provider, order_id: order.id, amount: Number(amount ?? 0), currency: String(currency || 'usd').toUpperCase(), reference: ref || '', plugin: product.slug });
-    // A buyer who came from react-wp.com gets the purchase on their account there (never throws; retried from the admin status).
+    // A listed plugin's sale goes onto the buyer's react-wp.com account (Buy reference, else their confirmed email address); never
+    // throws, retried from the admin status.
     await reportPurchase(ctx, order.id);
   }
   return result;

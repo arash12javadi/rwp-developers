@@ -18,6 +18,7 @@
  *     (`RWPDPKG1|plugin|version|domain|sha256|exp`, the same key pair, so the site checks it with the public key react-wp.com
  *     delivered with the licence).
  */
+import { createHash } from 'node:crypto';
 import { platformRequest, LicenseLinkError } from '../../../server/licenseLink.mjs';
 import { sendPluginMail } from '../../../server/mailer.mjs';
 import { DEVELOPERS_EMAIL_CONFIG_KEY } from '../../../server/pluginIntegrationAccess.mjs';
@@ -54,43 +55,71 @@ export async function rememberRef(ctx, orderId, ref) {
  * Reports one paid order to react-wp.com when it carries a buyer reference and its product is listed there. Never throws.
  * Returns `{ reported, reason }`.
  */
-export async function reportPurchase(ctx, orderId, { io = serviceLinkIo(ctx), fetchImpl } = {}) {
+export async function reportPurchase(ctx, orderId, { io = serviceLinkIo(ctx), fetchImpl, emailOf = confirmedEmail } = {}) {
   try {
-    const [order] = await select(ctx, `dev_orders?id=eq.${enc(orderId)}&select=id,product_id,provider,amount,currency,status,platform_ref,platform_reported_at`, 'service');
-    if (!order || order.status !== 'paid' || !order.platform_ref || order.platform_reported_at) return { reported: false, reason: 'nothing_to_report' };
+    const [order] = await select(ctx, `dev_orders?id=eq.${enc(orderId)}&select=id,product_id,buyer_id,provider,amount,currency,status,paid_at,platform_ref,platform_reported_at`, 'service');
+    // Every paid sale of a listed plugin is reported once (20261128), not only one that started with Buy on react-wp.com: a buyer
+    // who came to this shop directly, or lost `?rwp_ref=` on the way (another tab, a sign-in, a cancelled payment), still finds it.
+    if (!order || order.status !== 'paid' || order.platform_reported_at) return { reported: false, reason: 'nothing_to_report' };
     const [license] = await select(ctx, `dev_licenses?order_id=eq.${enc(order.id)}&select=license_key,domain`, 'service');
     const [product] = await select(ctx, `dev_products?id=eq.${enc(order.product_id)}&select=slug`, 'service');
     const [listing] = await select(ctx, `dev_listings?product_id=eq.${enc(order.product_id)}&select=plugin_id`, 'service').catch(() => []);
     if (!license || !product || !listing?.plugin_id) return { reported: false, reason: 'not_listed' };
+    // Not the address itself: its sha256 (trimmed, lower case), which react-wp.com can only match to an account that already has it.
+    const email = await emailOf(ctx, order.buyer_id).catch(() => '');
     const answer = await platformRequest({
       io, path: 'developer/purchase', method: 'POST', timeoutMs: 15_000, ...(fetchImpl ? { fetchImpl } : {}),
       body: {
-        plugin: product.slug, license_key: license.license_key, buyer_ref: order.platform_ref, order_ref: order.id,
+        plugin: product.slug, license_key: license.license_key, buyer_ref: order.platform_ref || '', order_ref: order.id,
+        ...(email ? { buyer_email_hash: emailHash(email) } : {}), paid_at: order.paid_at || '',
         amount: Number(order.amount) || 0, currency: order.currency, gateway: order.provider, domains: license.domain ? [license.domain] : [],
       },
     });
     // Accepted, already known, or no buyer to match (the reference expired): either way it is not sent again.
     await update(ctx, 'dev_orders', `id=eq.${enc(order.id)}`, {
       platform_reported_at: new Date().toISOString(), platform_ref: '',
-      platform_error: answer.body?.recorded ? '' : `react-wp.com did not match a buyer (${String(answer.body?.reason || 'unknown')}).`,
+      platform_error: answer.body?.recorded ? '' : 'no account there with the confirmed email address of the buyer; the buyer can claim the key on react-wp.com (Dashboard → My purchases).',
     }, 'service');
     return { reported: Boolean(answer.body?.recorded), reason: answer.body?.recorded ? '' : String(answer.body?.reason || '') };
   } catch (error) {
     await update(ctx, 'dev_orders', `id=eq.${enc(orderId)}`, { platform_error: errorText(error) }, 'service').catch(() => {});
-    // A refusal about this order (4xx) is final; anything else is retried.
+    // A refusal about this order (4xx) is final, so it is not sent again; anything else is retried.
     if (error instanceof LicenseLinkError && error.status >= 400 && error.status < 500 && error.status !== 401 && error.status !== 429) {
-      await update(ctx, 'dev_orders', `id=eq.${enc(orderId)}`, { platform_ref: '' }, 'service').catch(() => {});
+      await update(ctx, 'dev_orders', `id=eq.${enc(orderId)}`, { platform_ref: '', platform_reported_at: new Date().toISOString() }, 'service').catch(() => {});
     }
     return { reported: false, reason: errorText(error) };
   }
 }
 
-/** Paid orders whose report is still due (a few per call), from the admin status. */
-export async function reportPendingPurchases(ctx, { io, fetchImpl, max = 5 } = {}) {
-  const rows = await select(ctx, `dev_orders?status=eq.paid&platform_ref=neq.&platform_reported_at=is.null&select=id&order=paid_at.asc&limit=${max}`, 'service').catch(() => []);
+/** sha256 hex of a trimmed, lower-cased email address: what react-wp.com compares with its confirmed accounts. */
+export const emailHash = (email) => createHash('sha256').update(String(email || '').trim().toLowerCase()).digest('hex');
+
+/**
+ * The buyer's address as this site's auth confirmed it (never the editable profile field, which a buyer could set to someone else's
+ * address and have the sale land on that account). '' without the service key or a confirmed address.
+ */
+export async function confirmedEmail(ctx, userId) {
+  if (!ctx.supabase?.secretKey || !UUID.test(String(userId || ''))) return '';
+  const response = await fetch(`${String(ctx.supabase.url).replace(/\/$/, '')}/auth/v1/admin/users/${enc(userId)}`, {
+    headers: { apikey: ctx.supabase.secretKey, Authorization: `Bearer ${ctx.supabase.secretKey}` },
+  }).catch(() => null);
+  if (!response?.ok) return '';
+  const user = await response.json().catch(() => ({}));
+  return user?.email_confirmed_at && String(user.email || '').includes('@') ? String(user.email).trim() : '';
+}
+
+/**
+ * Paid orders of listed plugins whose report is still due (a few per call), from the admin status. This is also what reports
+ * the sales made before 20261128 that had no buyer reference.
+ */
+export async function reportPendingPurchases(ctx, { io, fetchImpl, emailOf, max = 5 } = {}) {
+  const listed = (await select(ctx, 'dev_listings?plugin_id=not.is.null&select=product_id', 'service').catch(() => []))
+    .map((row) => String(row.product_id || '')).filter((id) => UUID.test(id));
+  if (!listed.length) return 0;
+  const rows = await select(ctx, `dev_orders?status=eq.paid&platform_reported_at=is.null&product_id=in.(${listed.join(',')})&select=id&order=paid_at.asc&limit=${max}`, 'service').catch(() => []);
   let reported = 0;
   for (const row of rows) {
-    if ((await reportPurchase(ctx, row.id, { ...(io ? { io } : {}), fetchImpl })).reported) reported += 1;
+    if ((await reportPurchase(ctx, row.id, { ...(io ? { io } : {}), fetchImpl, ...(emailOf ? { emailOf } : {}) })).reported) reported += 1;
   }
   return reported;
 }
@@ -255,7 +284,7 @@ export const inboxList = (ctx, options, scope = 'seller') =>
 /** The local order a message is about, with its licence key; throws a sentence when there is none. */
 async function orderWithKey(ctx, orderId) {
   if (!UUID.test(String(orderId || ''))) throw new HttpError(400, 'Choose the sale first.');
-  const [order] = await select(ctx, `dev_orders?id=eq.${enc(orderId)}&select=id,buyer_id,product_id,status,platform_ref,platform_reported_at`, 'service');
+  const [order] = await select(ctx, `dev_orders?id=eq.${enc(orderId)}&select=id,buyer_id,product_id,status,platform_ref,platform_reported_at,platform_error`, 'service');
   if (!order) throw new HttpError(404, 'That order does not exist.');
   const [license] = await select(ctx, `dev_licenses?order_id=eq.${enc(order.id)}&select=license_key,serial`, 'service').catch(() => []);
   return { order, license: license || null };
@@ -291,7 +320,7 @@ export async function buyerContact(ctx, orderId) {
     order_id: order.id,
     name: String(profile?.display_name || '').trim(),
     email: await buyerEmail(ctx, order.buyer_id),
-    on_platform: Boolean(order.platform_reported_at),
+    on_platform: Boolean(order.platform_reported_at && !order.platform_error),
     has_key: Boolean(license?.license_key),
   };
 }

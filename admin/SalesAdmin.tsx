@@ -90,7 +90,7 @@ export default function SalesAdmin() {
                     </button>
                     <br />
                     <span className={styles.muted}>
-                      {order.platform_reported_at ? 'On their react-wp.com account' : order.platform_error ? `react-wp.com: ${order.platform_error}` : order.status === 'paid' ? 'Not on react-wp.com (they can claim the key there)' : ''}
+                      {order.platform_reported_at && !order.platform_error ? 'On their react-wp.com account' : order.platform_error ? `react-wp.com: ${order.platform_error}` : order.status === 'paid' ? 'Not reported to react-wp.com yet (sent when you open Developers)' : ''}
                     </span>
                   </td>
                   <td>{PROVIDERS[order.provider] || order.provider}</td>
