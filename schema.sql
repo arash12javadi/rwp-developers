@@ -392,6 +392,10 @@ drop trigger if exists dev_refunds_touch on public.dev_refunds;
 create trigger dev_refunds_touch before update on public.dev_refunds for each row execute function public.dev_touch();
 
 -- The buyer asks for a refund of one of their own paid orders. `p_amount` null = everything not refunded yet.
+-- 28 days of no-questions refunds (20261128): a buyer's request within 28 days of the payment is approved at once (`automatic`) and
+-- sent through the order's gateway by the server; the shop cannot decline it or take the approval back. After that the shop decides.
+alter table public.dev_refunds add column if not exists automatic boolean not null default false;
+
 create or replace function public.dev_refund_open(p_order uuid, p_buyer uuid, p_reason text, p_amount numeric default null)
 returns jsonb language plpgsql volatile security definer set search_path = public as $$
 declare
@@ -399,6 +403,7 @@ declare
   v_left numeric;
   v_amount numeric;
   v_row public.dev_refunds%rowtype;
+  v_auto boolean;
 begin
   if auth.role() <> 'service_role' then
     raise exception 'Only the server can open a refund request.' using errcode = '42501';
@@ -410,7 +415,8 @@ begin
   if v_order.status <> 'paid' or v_order.amount <= 0 then
     raise exception 'Only a paid order can be refunded.' using errcode = '22023';
   end if;
-  if length(trim(coalesce(p_reason, ''))) < 10 then
+  v_auto := now() - coalesce(v_order.paid_at, v_order.created_at) <= interval '28 days';
+  if not v_auto and length(trim(coalesce(p_reason, ''))) < 10 then
     raise exception 'Tell the shop why you want a refund (at least a sentence).' using errcode = '22023';
   end if;
   v_left := v_order.amount - v_order.refunded_amount;
@@ -421,14 +427,18 @@ begin
   if exists (select 1 from public.dev_refunds where order_id = v_order.id and status in ('requested', 'approved', 'processing')) then
     raise exception 'There is already an open refund request for this order.' using errcode = '23505';
   end if;
-  if exists (select 1 from public.dev_refunds where order_id = v_order.id and status = 'declined') then
+  -- Within the 28 days an earlier "no" does not count: the refund is guaranteed.
+  if not v_auto and exists (select 1 from public.dev_refunds where order_id = v_order.id and status = 'declined') then
     raise exception 'The shop already decided that this order is not refunded.' using errcode = '22023';
   end if;
   if (select count(*) from public.dev_refunds where order_id = v_order.id and origin = 'buyer') >= 5 then
     raise exception 'This order has been asked about too many times. Contact the shop instead.' using errcode = '22023';
   end if;
-  insert into public.dev_refunds (order_id, buyer_id, amount, currency, reason, origin)
-  values (v_order.id, v_order.buyer_id, round(v_amount, 2), v_order.currency, left(trim(p_reason), 2000), 'buyer')
+  insert into public.dev_refunds (order_id, buyer_id, amount, currency, reason, origin, status, automatic, owner_note, decided_at)
+  values (v_order.id, v_order.buyer_id, round(v_amount, 2), v_order.currency, left(trim(coalesce(p_reason, '')), 2000), 'buyer',
+          case when v_auto then 'approved' else 'requested' end, v_auto,
+          case when v_auto then 'Refunded automatically: asked within 28 days of the purchase.' else '' end,
+          case when v_auto then now() else null end)
   returning * into v_row;
   return to_jsonb(v_row);
 end;
@@ -469,6 +479,33 @@ begin
   returning * into v_row;
   if v_row.id is null then
     raise exception 'That request is not waiting for an answer.' using errcode = '22023';
+  end if;
+  return to_jsonb(v_row);
+end;
+$$;
+
+-- The owner takes back an approval before any money moved (20261128): a buyer's request goes back to waiting for an answer (so it
+-- can be declined with a reason, or approved again), the owner's own refund is cancelled. Not while it is being sent, and never
+-- once a gateway refund id was recorded.
+create or replace function public.dev_refund_undo(p_refund uuid, p_actor uuid)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare
+  v_row public.dev_refunds%rowtype;
+begin
+  if auth.role() <> 'service_role' then
+    raise exception 'Only the server can change a refund.' using errcode = '42501';
+  end if;
+  update public.dev_refunds
+     set status = case when origin = 'buyer' then 'requested' else 'cancelled' end,
+         owner_note = case when origin = 'buyer' then '' else owner_note end,
+         decided_by = case when origin = 'buyer' then null else p_actor end,
+         decided_at = case when origin = 'buyer' then null else now() end,
+         revoke_license = false,
+         error = ''
+   where id = p_refund and status = 'approved' and gateway_refund_id is null and not automatic
+  returning * into v_row;
+  if v_row.id is null then
+    raise exception 'Only an approved refund that was not sent yet, and was not an automatic refund within 28 days, can be cancelled.' using errcode = '22023';
   end if;
   return to_jsonb(v_row);
 end;
@@ -691,6 +728,7 @@ grant execute on function public.dev_record_version(jsonb) to service_role;
 revoke execute on function public.dev_refund_open(uuid, uuid, text, numeric) from public, anon, authenticated;
 revoke execute on function public.dev_refund_cancel(uuid, uuid) from public, anon, authenticated;
 revoke execute on function public.dev_refund_decide(uuid, uuid, boolean, text, boolean) from public, anon, authenticated;
+revoke execute on function public.dev_refund_undo(uuid, uuid) from public, anon, authenticated;
 revoke execute on function public.dev_refund_issue(uuid, uuid, numeric, text, boolean) from public, anon, authenticated;
 revoke execute on function public.dev_refund_claim(uuid) from public, anon, authenticated;
 revoke execute on function public.dev_refund_release(uuid, text) from public, anon, authenticated;
@@ -699,6 +737,7 @@ revoke execute on function public.dev_refund_from_gateway(text, text, numeric, u
 grant execute on function public.dev_refund_open(uuid, uuid, text, numeric) to service_role;
 grant execute on function public.dev_refund_cancel(uuid, uuid) to service_role;
 grant execute on function public.dev_refund_decide(uuid, uuid, boolean, text, boolean) to service_role;
+grant execute on function public.dev_refund_undo(uuid, uuid) to service_role;
 grant execute on function public.dev_refund_issue(uuid, uuid, numeric, text, boolean) to service_role;
 grant execute on function public.dev_refund_claim(uuid) to service_role;
 grant execute on function public.dev_refund_release(uuid, text) to service_role;
@@ -772,6 +811,10 @@ alter table public.dev_orders drop constraint if exists dev_orders_platform_ref_
 alter table public.dev_orders add constraint dev_orders_platform_ref_check check (char_length(platform_ref) <= 100 and platform_ref ~ '^[A-Za-z0-9_-]*$');
 alter table public.dev_orders add column if not exists platform_reported_at timestamptz;
 alter table public.dev_orders add column if not exists platform_error text not null default '';
+-- 20261128: a buyer's refund request declined here is reported to react-wp.com (reportStoreDecline), where the buyer can ask the
+-- marketplace owner to rule. platform_reported_at: told (or refused for good); platform_error: the last refusal, retried otherwise.
+alter table public.dev_refunds add column if not exists platform_reported_at timestamptz;
+alter table public.dev_refunds add column if not exists platform_error text not null default '';
 -- Why a licence was revoked (refund, abuse) and whether react-wp.com was told; the signed list at GET store/revoked is the record.
 alter table public.dev_licenses add column if not exists revoke_reason text not null default '';
 alter table public.dev_licenses drop constraint if exists dev_licenses_revoke_reason_check;

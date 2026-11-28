@@ -1,7 +1,7 @@
 import { describeDbError, getSupabaseClient } from '../../../src/lib/db';
 import type {
   DevLicense, DevOrder, DevProduct, DevRefund, DevRefundResult, DevVersion, ImportResult, ListingOverview, ListingSendResult, MyLicense,
-  PaymentSettingsInput, PaymentStatus, StoreCatalog, UploadResult, InboxTicket, InboxThread,
+  PaymentSettingsInput, PaymentStatus, StoreCatalog, UploadResult, InboxTicket, InboxThread, BuyerContact, SellerPlugin,
 } from './types';
 
 const ROUTES = '/api/plugins/rwp-developers';
@@ -77,7 +77,7 @@ export const releaseMyDomain = (licenseId: string) => post<{ released: boolean }
 /** Refunds, the buyer's side: ask the shop's owner (their answer is final), see the answer, withdraw while it waits. */
 export const myRefunds = () => get<{ refunds: DevRefund[] }>('my/refunds').then((answer) => answer.refunds);
 export const askForRefund = (orderId: string, reason: string, amount?: number | null) =>
-  post<{ refund: DevRefund }>('my/refund-request', { order_id: orderId, reason, ...(amount ? { amount } : {}) });
+  post<{ refund: DevRefund; automatic?: boolean; sent?: boolean }>('my/refund-request', { order_id: orderId, reason, ...(amount ? { amount } : {}) });
 export const withdrawRefund = (refundId: string) => post<{ refund: DevRefund }>('my/refund-cancel', { refund_id: refundId });
 
 /** Refunds, the owner's side. A Stripe refund is sent on approval; a NOWPayments (USDT) refund is sent by hand and then recorded. */
@@ -94,7 +94,15 @@ export const markRefundPaid = (refundId: string, payoutReference: string) =>
 export const adminStatus = () => get<PaymentStatus>('admin/status');
 
 /* -------------------------------------------------------------- messages from react-wp.com (the shop's inbox) */
-export const inboxList = () => get<{ tickets: InboxTicket[] }>('admin/inbox');
+/** `seller`: conversations with buyers of this shop's plugins; `buyer`: with sellers of plugins this account bought. */
+export const inboxList = (scope: 'seller' | 'buyer' = 'seller') => get<{ tickets: InboxTicket[] }>(`admin/inbox${scope === 'buyer' ? '?scope=buyer' : ''}`);
+/** Starts a conversation on react-wp.com with the buyer of one order. */
+export const inboxOpen = (input: { order_id: string; subject: string; message: string }) => post<{ ticket: { id: string } }>('admin/inbox/open', input);
+export const inboxSellers = () => get<{ plugins: SellerPlugin[] }>('admin/inbox/sellers');
+export const inboxAskSeller = (input: { plugin_id: string; subject: string; message: string }) => post<{ ticket: { id: string } }>('admin/inbox/ask-seller', input);
+export const buyerContact = (orderId: string) => post<BuyerContact>('admin/orders/contact', { order_id: orderId });
+export const emailBuyer = (input: { order_id: string; subject: string; message: string }) => post<{ sent: boolean }>('admin/orders/email', input);
+export const undoRefund = (refundId: string) => post<{ refund: DevRefund }>('admin/refunds/undo', { refund_id: refundId });
 export const inboxThread = (ticketId: string) => post<InboxThread>('admin/inbox/thread', { ticket_id: ticketId });
 export const inboxReply = (ticketId: string, message: string) => post<InboxThread>('admin/inbox/reply', { ticket_id: ticketId, message });
 export const inboxDecide = (input: { ticket_id: string; decision: 'approve' | 'decline'; reason: string; amount?: number | null; manual?: boolean; payout_reference?: string }) =>
@@ -134,7 +142,7 @@ export const listProducts = async () => must<DevProduct[]>(await getSupabaseClie
 export const listVersions = async (productId: string) =>
   must<DevVersion[]>(await getSupabaseClient().from('dev_versions').select('*').eq('product_id', productId).order('created_at', { ascending: false }));
 export const listOrders = async () =>
-  must<DevOrder[]>(await getSupabaseClient().from('dev_orders').select('id,product_id,buyer_id,provider,amount,currency,status,created_at,paid_at,refunded_amount,dev_products(title,slug)').order('created_at', { ascending: false }).limit(200));
+  must<DevOrder[]>(await getSupabaseClient().from('dev_orders').select('id,product_id,buyer_id,provider,amount,currency,status,created_at,paid_at,refunded_amount,platform_reported_at,platform_error,dev_products(title,slug)').order('created_at', { ascending: false }).limit(200));
 export const listLicenses = async () =>
   must<DevLicense[]>(await getSupabaseClient().from('dev_licenses').select('id,product_id,user_id,serial,status,expires_at,domain,created_at,dev_products(title,slug)').order('created_at', { ascending: false }).limit(200));
 

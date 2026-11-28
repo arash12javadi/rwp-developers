@@ -21,6 +21,7 @@ drop function if exists public.dev_record_version(jsonb);
 drop function if exists public.dev_refund_open(uuid, uuid, text, numeric);
 drop function if exists public.dev_refund_cancel(uuid, uuid);
 drop function if exists public.dev_refund_decide(uuid, uuid, boolean, text, boolean);
+drop function if exists public.dev_refund_undo(uuid, uuid);
 drop function if exists public.dev_refund_issue(uuid, uuid, numeric, text, boolean);
 drop function if exists public.dev_refund_claim(uuid);
 drop function if exists public.dev_refund_release(uuid, text);

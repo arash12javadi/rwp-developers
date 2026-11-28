@@ -73,6 +73,9 @@ export interface DevOrder {
   created_at: string;
   paid_at: string | null;
   refunded_amount?: number;
+  /** When the sale was recorded on the buyer's react-wp.com account, and the last error doing so. */
+  platform_reported_at?: string | null;
+  platform_error?: string;
   dev_products?: { title: string; slug: string } | null;
 }
 
@@ -143,6 +146,13 @@ export interface DevRefund {
   refunded_at: string | null;
   created_at: string;
   updated_at: string;
+  /** The owner's list: when a decline was reported to react-wp.com (or refused for good), and the last error. */
+  platform_reported_at?: string | null;
+  platform_error?: string;
+  /** Approved without a decision: asked within 28 days of the payment (the shop cannot decline or take it back). */
+  automatic?: boolean;
+  /** The buyer's list: a decline react-wp.com was told about, so its marketplace owner can be asked to rule. */
+  appealable?: boolean;
   /** The owner's list only. */
   order?: { id: string; product_id: string; provider: DevOrder['provider']; amount: number; refunded_amount: number; currency: string; created_at: string } | null;
   product?: { id: string; title: string; slug: string } | null;
@@ -208,10 +218,32 @@ export interface InboxTicket {
   plugin_title: string;
   plugin_slug: string;
   buyer_name: string;
+  /** The seller's display name (the other side when this account is the buyer). */
+  seller_name?: string;
+  /** Who wrote first: a buyer, or the seller (a message started from Sales or Messages). */
+  opened_by?: 'buyer' | 'seller' | 'owner';
+}
+
+/** The buyer of one order, read on demand for the shop's owner. */
+export interface BuyerContact {
+  order_id: string;
+  name: string;
+  email: string;
+  /** The purchase is on the buyer's react-wp.com account, so a conversation can be started there. */
+  on_platform: boolean;
+  has_key: boolean;
+}
+
+/** A plugin this account owns whose seller it can write to. */
+export interface SellerPlugin {
+  plugin_id: string;
+  title: string;
+  seller_name: string;
 }
 
 export interface InboxThread {
-  role: 'seller';
+  /** How this account takes part: the seller of the plugin, or a buyer of someone else's. */
+  role: 'seller' | 'buyer';
   ticket: InboxTicket;
   messages: Array<{ id: string; author_role: 'buyer' | 'seller' | 'owner' | 'system'; body: string; created_at: string }>;
   purchase: { license_serial: string; amount: number; currency: string; status: string; created_at: string } | null;

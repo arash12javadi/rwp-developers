@@ -12,7 +12,7 @@ import { readSecret } from './secrets.mjs';
 import { gatewayCredentials, gatewayErrorToHttp } from './payments.mjs';
 import { readPaymentsConfig } from './store.mjs';
 import { announcePayment, credentialStatus, getGateway } from '../../../server/payments/registry.mjs';
-import { afterRefundSettled } from './platformSync.mjs';
+import { afterRefundSettled, reportStoreDecline } from './platformSync.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const enc = encodeURIComponent;
@@ -37,12 +37,19 @@ export const refundAmount = (value) => {
  */
 export const refundMethod = (provider) => (getGateway(String(provider || ''))?.supports.refund ? String(provider) : 'manual');
 
-const COLUMNS = 'id,order_id,amount,currency,reason,owner_note,status,origin,revoke_license,gateway_refund_id,payout_reference,error,decided_at,refunded_at,created_at,updated_at';
+const COLUMNS = 'id,order_id,amount,currency,reason,owner_note,status,origin,revoke_license,gateway_refund_id,payout_reference,error,decided_at,refunded_at,created_at,updated_at,platform_reported_at,platform_error,automatic';
 
-/** The signed-in buyer's own refund requests. */
+/**
+ * The signed-in buyer's own refund requests. `appealable`: a decline react-wp.com was told about, so the buyer can ask its
+ * marketplace owner to rule there. The reporting details themselves stay with the owner.
+ */
 export async function buyerRefunds(ctx, user) {
   const rows = await select(ctx, `dev_refunds?buyer_id=eq.${enc(user.id)}&select=${COLUMNS}&order=created_at.desc&limit=100`, 'service');
-  return { refunds: rows };
+  return {
+    refunds: rows.map(({ platform_reported_at: reported, platform_error: failure, ...row }) => ({
+      ...row, appealable: row.status === 'declined' && Boolean(reported) && !failure,
+    })),
+  };
 }
 
 /** The owner's list: every refund (open first) with the order, the plugin and the buyer's name. */
@@ -70,10 +77,20 @@ export async function ownerRefunds(ctx) {
   };
 }
 
-export async function requestRefund(ctx, user, body) {
+export async function requestRefund(ctx, user, body, { fetchImpl = fetch } = {}) {
   const row = await rpc(ctx, 'dev_refund_open', {
     p_order: uuid(body?.order_id, 'the order'), p_buyer: user.id, p_reason: text(body?.reason), p_amount: refundAmount(body?.amount),
   }, 'service');
+  // Within 28 days of the payment the refund is approved by the database and sent now, through the order's gateway. A gateway
+  // without a refund API (USDT), or one that refuses, leaves it approved for the shop owner to send: the buyer's request stands.
+  if (row?.status === 'approved' && row.automatic) {
+    try {
+      const sent = await sendApproved(ctx, row, null, { fetchImpl });
+      return { refund: sent.refund || row, automatic: true, sent: sent.sent !== false };
+    } catch {
+      return { refund: row, automatic: true, sent: false };
+    }
+  }
   return { refund: row };
 }
 
@@ -89,8 +106,14 @@ export async function decideRefund(ctx, owner, body, { fetchImpl = fetch } = {})
   const row = await rpc(ctx, 'dev_refund_decide', {
     p_refund: uuid(body?.refund_id, 'a request'), p_actor: owner.id, p_approve: approve, p_note: note, p_revoke: body?.revoke === true,
   }, 'service');
-  if (!approve) return { refund: row, sent: false };
+  // A "no" is reported to react-wp.com when the plugin is listed there, so the buyer can ask its owner to rule (never throws).
+  if (!approve) return { refund: row, sent: false, platform: await reportStoreDecline(ctx, row?.id) };
   return sendApproved(ctx, row, owner, { fetchImpl });
+}
+
+/** The owner takes back an approval that was not sent yet: a buyer's request waits for an answer again, the owner's own refund is cancelled. */
+export async function undoRefund(ctx, owner, body) {
+  return { refund: await rpc(ctx, 'dev_refund_undo', { p_refund: uuid(body?.refund_id, 'a refund'), p_actor: owner.id }, 'service') };
 }
 
 /** The owner refunds an order directly. `manual: true` records money already returned elsewhere (needs a reference). */

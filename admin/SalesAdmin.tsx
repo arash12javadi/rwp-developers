@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
-import { clearLicenseDomain, listLicenses, listOrders, setLicenseStatus } from '../lib/api';
-import type { DevLicense, DevOrder } from '../lib/types';
+import { Fragment, useCallback, useEffect, useState } from 'react';
+import { clearLicenseDomain, listLicenses, listOrders, ownerRefunds, setLicenseStatus } from '../lib/api';
+import type { DevLicense, DevOrder, DevRefund } from '../lib/types';
+import BuyerMessage from './BuyerMessage';
 import RefundsPanel, { OrderRefundForm } from './RefundsPanel';
 import styles from '../developers.module.css';
 
@@ -15,6 +16,8 @@ const PROVIDERS: Record<string, string> = {
 export default function SalesAdmin() {
   const [tab, setTab] = useState<'orders' | 'licenses' | 'refunds'>('orders');
   const [refunding, setRefunding] = useState('');
+  const [contacting, setContacting] = useState('');
+  const [refunds, setRefunds] = useState<DevRefund[]>([]);
   const [orders, setOrders] = useState<DevOrder[] | null>(null);
   const [licenses, setLicenses] = useState<DevLicense[] | null>(null);
   const [busy, setBusy] = useState('');
@@ -24,7 +27,10 @@ export default function SalesAdmin() {
   const load = useCallback(() => {
     listOrders().then(setOrders).catch((loadError: unknown) => { setOrders([]); setError(errorText(loadError, 'Could not load the orders.')); });
     listLicenses().then(setLicenses).catch((loadError: unknown) => { setLicenses([]); setError(errorText(loadError, 'Could not load the licences.')); });
+    // Open refund requests are marked on their order; if they cannot be read, the orders still show.
+    ownerRefunds().then(setRefunds).catch(() => setRefunds([]));
   }, []);
+  const openRequest = useCallback((orderId: string) => refunds.find((row) => row.order_id === orderId && ['requested', 'approved', 'processing'].includes(row.status)) || null, [refunds]);
   useEffect(() => { load(); }, [load]);
 
   const act = async (id: string, run: () => Promise<void>, done: string) => {
@@ -68,22 +74,49 @@ export default function SalesAdmin() {
       {tab === 'orders' && (!orders ? <p className={styles.muted}>Loading…</p> : !orders.length ? <p className={styles.hint}>No orders yet.</p> : (
         <div className={styles.panel}><div className={styles.tableWrap}>
           <table className={styles.table}>
-            <thead><tr><th>Date</th><th>Plugin</th><th>Method</th><th>Amount</th><th>Status</th><th /></tr></thead>
+            <thead><tr><th>Date</th><th>Plugin</th><th>Buyer</th><th>Method</th><th>Amount</th><th>Status</th><th /></tr></thead>
             <tbody>
-              {orders.map((order) => (
-                <tr key={order.id}>
+              {orders.map((order) => {
+                const request = openRequest(order.id);
+                return (
+                <Fragment key={order.id}>
+                <tr>
                   <td>{when(order.paid_at || order.created_at)}</td>
                   <td>{order.dev_products?.title || '—'}</td>
+                  <td>
+                    <button type="button" className={`${styles.button} ${styles.ghost}`} aria-expanded={contacting === order.id}
+                      onClick={() => setContacting(contacting === order.id ? '' : order.id)}>
+                      {contacting === order.id ? 'Close' : 'Contact buyer'}
+                    </button>
+                    <br />
+                    <span className={styles.muted}>
+                      {order.platform_reported_at ? 'On their react-wp.com account' : order.platform_error ? `react-wp.com: ${order.platform_error}` : order.status === 'paid' ? 'Not on react-wp.com (they can claim the key there)' : ''}
+                    </span>
+                  </td>
                   <td>{PROVIDERS[order.provider] || order.provider}</td>
                   <td>${Number(order.amount).toFixed(2)}{Number(order.refunded_amount || 0) > 0 ? <><br /><span className={styles.muted}>${Number(order.refunded_amount).toFixed(2)} refunded</span></> : null}</td>
-                  <td><span className={`${styles.badge} ${styles[order.status]}`}>{order.status}</span></td>
+                  <td>
+                    <span className={`${styles.badge} ${styles[order.status]}`}>{order.status}</span>
+                    {request && (
+                      <><br /><button type="button" className={`${styles.button} ${styles.ghost}`} onClick={() => setTab('refunds')}>
+                        {request.status === 'requested' ? 'Refund requested: answer it' : 'Refund approved, not sent: open'}
+                      </button></>
+                    )}
+                  </td>
                   <td>
                     {order.status === 'paid' && Number(order.amount) - Number(order.refunded_amount || 0) > 0 && (refunding === order.id
                       ? <OrderRefundForm order={order} onClose={() => setRefunding('')} onDone={(text) => { setMessage(text); load(); }} />
                       : <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy !== ''} onClick={() => setRefunding(order.id)}>Refund…</button>)}
                   </td>
                 </tr>
-              ))}
+                {contacting === order.id && (
+                  <tr><td colSpan={7}>
+                    <BuyerMessage orderId={order.id} title={order.dev_products?.title || 'your plugin'} onSent={(text) => setMessage(text)} onClose={() => setContacting('')} />
+                  </td></tr>
+                )}
+                </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div></div>

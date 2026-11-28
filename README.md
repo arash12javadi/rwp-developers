@@ -121,12 +121,19 @@ When the Marketplace plugin is installed on the same Supabase project, every plu
 
 ### Refunds
 
-You are the seller, so you decide, and your answer is final.
+**Within 28 days of the payment a buyer gets their money back without discussion:** their request is approved at once (no reason needed,
+an earlier "no" does not count) and sent through the order's gateway; a USDT payment waits for you to send it by hand. You cannot decline
+or cancel such a refund (`dev_refunds.automatic`). After 28 days you are the seller, so you decide. Your answer is final on this shop; for a plugin **listed on react-wp.com**, a buyer whose request
+you declined can ask the react-wp.com marketplace owner to rule (see *Declined refunds can be appealed* below).
 
 - **A buyer asks** from *My purchases* on `/store` (**Ask for a refund**: a reason, and optionally a smaller amount). They can withdraw
   it while it waits. You see it under **Sales & licences → Refunds**.
-- **You answer:** *Approve refund* or *Decline (final)* with a reason the buyer reads. A declined order cannot be asked about again.
+- **You answer:** *Approve refund* or *Decline* with a reason the buyer reads. A declined order cannot be asked about again on this shop.
 - **You refund without being asked:** **Refund…** on a paid order in **Sales & licences → Orders** (all, or part of it).
+- **Cancel a refund you approved, before anything was sent:** **Cancel this refund** on an *Approved, not sent* refund (a USDT refund
+  waiting for you to send it, or a card refund the gateway refused). A buyer's request goes back to *Waiting for you*, so you can decline
+  it with a reason or approve it again; a refund you started yourself is cancelled. Once a gateway refund id is recorded it cannot be
+  cancelled. An order with an open request shows *Refund requested: answer it* on the Orders tab.
 - **Card (Stripe):** approving refunds it through your own Stripe account at once. It is claimed in the database first and sent with an
   idempotency key, so a double click never refunds twice; if Stripe refuses, it stays *approved* with Stripe's reason and you can try
   again. Add the events `refund.created`, `refund.updated` and `charge.refunded` to your Stripe webhook: a refund you make in the
@@ -140,20 +147,37 @@ You are the seller, so you decide, and your answer is final.
   (*Settings → Integrations → Email*; core `sendPluginMail`, so this plugin never sees the mail credentials). Without email set up,
   they see the answer on `/store` only.
 - A **declined** request needs a reason of at least 10 characters.
+- **Declined refunds can be appealed (20261128).** When the plugin is listed on react-wp.com, every decline is reported there over the
+  account link (the key, the amount, the buyer's reason and yours; `dev_refunds.platform_reported_at` / `platform_error`, retried when
+  you open *Developers*). react-wp.com opens a declined refund conversation on the buyer's account (at once, or when they claim the key
+  there); the buyer sees a link to it on `/store` and can ask the marketplace owner to rule. That ruling is final: if it says you must
+  refund, the request appears under **Developers → Messages** as *owner ruled: refund the buyer*. *Sales → Refunds* shows whether
+  react-wp.com was told. A plugin that is not listed there is not reported, and your answer stays final.
 - **A revoked key goes on your signed revocation list** (`GET /api/plugins/rwp-developers/store/revoked`) and, when the plugin is
   listed on react-wp.com, is pushed there too (at the refund, and again from the admin status if that failed), so it no longer counts
   as a purchase there either.
 
-### Messages from react-wp.com (Developers → Messages)
+### Messages between buyers and sellers (Developers → Messages)
 
-When a plugin of yours is listed on react-wp.com, buyers can ask you questions before buying, ask for support, and ask for a refund
-there. **Developers → Messages** lists those conversations (over this site's account link) and lets you answer them. A **refund request**
-is decided here, because the money is on your payment account:
+The conversations are held on react-wp.com and read here over this site's account link, so this site must be connected
+(*Plugins → Connect to react-wp.com*). **Developers → Messages** has two lists:
+
+- **Your buyers**: questions before buying, support and refund requests about your listed plugins, and conversations you start.
+  **New message to a buyer** (or **Contact buyer** on *Sales & licences → Orders*) picks one of your sales. When the purchase is on the
+  buyer's react-wp.com account (they pressed Buy there, or claimed the key), the message starts a conversation there: it shows here and
+  under the buyer's *Messages* on react-wp.com, and they are emailed about it. Otherwise it is **emailed** to the buyer through your
+  site's email settings, with replies going to your own address (at most 30 emails an hour from one server instance). **Contact buyer**
+  also shows the buyer's name and email address, read on demand for that one order.
+- **Your sellers**: conversations with the developers of plugins this account bought, and **New message to a seller** for any plugin you
+  own from another developer.
+
+You can start at most 20 conversations with buyers a day; a buyer can start 5 a day, and conversations a seller starts do not count
+against the buyer's 5. A **refund request** is decided here, because the money is on your payment account:
 
 - **Approve refund** finds your own order by the key's serial, refunds it through its gateway (Stripe, PayPal, Mollie, GoCardless) or,
   for USDT or another method without a refund API, after you type how you sent it back; a full refund revokes the key. The decision is
   then reported to react-wp.com and the buyer is told.
-- **Decline** needs a written reason. The buyer may then ask the react-wp.com marketplace owner to rule. That ruling is final there: if
+- **Decline refund** needs a written reason (10 characters or more; the button tells you when it is missing). The buyer may then ask the react-wp.com marketplace owner to rule. That ruling is final there: if
   it says you must refund, the request comes back here as *owner ruled: refund the buyer*, and the listing may be flagged or unlisted if
   you do not.
 

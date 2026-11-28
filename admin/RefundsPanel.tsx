@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { decideRefund, issueRefund, markRefundPaid, ownerRefunds, retryRefund } from '../lib/api';
+import { decideRefund, issueRefund, markRefundPaid, ownerRefunds, retryRefund, undoRefund } from '../lib/api';
 import type { DevOrder, DevRefund, DevRefundStatus } from '../lib/types';
 import styles from '../developers.module.css';
 
 /**
- * Developers → Sales & licences → Refunds. Buyers ask from "My purchases" on the store; you are the seller, so your answer is final.
+ * Developers → Sales & licences → Refunds. Buyers ask from "My purchases" on the store; you are the seller. A decline of a plugin listed on
+ * react-wp.com is reported there (reportStoreDecline), and the buyer may ask its marketplace owner to rule; otherwise your answer is final.
  * A Stripe payment is refunded through Stripe the moment you approve; a NOWPayments (USDT) payment has no refund API, so you send it
  * back from your wallet and record it here. A full refund always revokes the licence.
  */
@@ -41,7 +42,7 @@ export default function RefundsPanel({ onChanged }: { onChanged: () => void }) {
   return (
     <div>
       <p className={styles.hint}>
-        Buyers ask for a refund from <strong>My purchases</strong> on your store. Your answer is final. Approving a card payment refunds it
+        Buyers ask for a refund from <strong>My purchases</strong> on your store. If you decline a plugin that is listed on react-wp.com, the buyer can ask its marketplace owner to rule (that ruling is final); otherwise your answer is final. Approving a card payment refunds it
         through your Stripe account straight away; a USDT payment is sent back by you from your wallet and then recorded here. To refund an
         order nobody asked about, use <strong>Refund…</strong> on the Orders tab.
       </p>
@@ -70,15 +71,27 @@ function RefundRow({ row, onDone }: { row: DevRefund; onDone: (message: string) 
   };
 
   const decide = (approve: boolean) => {
-    if (!approve && note.trim().length < 5) { setError('Say why you decline: the buyer reads it, and it is final.'); return; }
+    if (!approve && note.trim().length < 10) { setError('Say why you decline (at least 10 characters): the buyer reads it, and it is final.'); return; }
     const confirmText = approve
       ? `Refund ${usd(row.amount)}? ${row.refund_method && row.refund_method !== 'manual' ? `The payment is refunded through ${row.refund_method === 'stripe' ? 'Stripe' : row.refund_method} now.` : 'You send the money back by hand, then record it here.'}`
-      : 'Decline this refund? It is final: the buyer cannot ask again for this order.';
+      : 'Decline this refund? The buyer cannot ask this shop again for this order. If the plugin is listed on react-wp.com, they can ask its marketplace owner to rule.';
     if (!window.confirm(confirmText)) return;
     void run(approve ? 'approve' : 'decline', async () => {
       const result = await decideRefund(row.id, approve, note.trim(), revoke);
       if (!approve) return 'Declined.';
       return result.sent ? `Refunded ${usd(row.amount)} through Stripe.` : (result.message || 'Approved.');
+    });
+  };
+
+  // Takes back an approval before any money moved: a buyer's request waits for your answer again; your own refund is cancelled.
+  const undo = () => {
+    const ask = row.origin === 'buyer'
+      ? 'Cancel this approval? Nothing has been sent. The request goes back to waiting for your answer, so you can decline it with a reason or approve it again.'
+      : 'Cancel this refund? Nothing has been sent, and the order stays as it is.';
+    if (!window.confirm(ask)) return;
+    void run('undo', async () => {
+      await undoRefund(row.id);
+      return row.origin === 'buyer' ? 'The approval was cancelled. The request is waiting for your answer again.' : 'The refund was cancelled.';
     });
   };
 
@@ -98,8 +111,18 @@ function RefundRow({ row, onDone }: { row: DevRefund; onDone: (message: string) 
         {' · '}{row.refund_method === 'stripe' ? 'Card (Stripe)' : row.refund_method && row.refund_method !== 'manual' ? `${row.refund_method}: refunded automatically` : 'Sent by hand (USDT or another method)'}
         {order ? ` · order ${usd(order.amount)} on ${when(order.created_at)}` : ''}
       </p>
+      {row.automatic && <p className={styles.hint}>Automatic refund: the buyer asked within 28 days of the payment, so it cannot be declined or cancelled.</p>}
       {row.reason && <p><strong>Buyer:</strong> {row.reason}</p>}
       {row.owner_note && <p><strong>You:</strong> {row.owner_note}</p>}
+      {row.status === 'declined' && row.origin === 'buyer' && (
+        <p className={styles.hint}>
+          {row.platform_reported_at && !row.platform_error
+            ? 'react-wp.com was told: the buyer can ask its marketplace owner to rule, and that ruling is final.'
+            : row.platform_error
+              ? `react-wp.com: ${row.platform_error}`
+              : 'Not reported to react-wp.com yet; it is retried when you open Developers.'}
+        </p>
+      )}
       {row.payout_reference && <p className={styles.hint}>Payout reference: {row.payout_reference}</p>}
       {row.gateway_refund_id && <p className={styles.hint}>Stripe refund: <code>{row.gateway_refund_id}</code></p>}
       {row.error && <p className={styles.error}>Last attempt: {row.error}</p>}
@@ -114,7 +137,7 @@ function RefundRow({ row, onDone }: { row: DevRefund; onDone: (message: string) 
           )}
           <div className={styles.row}>
             <button type="button" className={styles.button} disabled={busy !== ''} onClick={() => decide(true)}>{busy === 'approve' ? 'Refunding…' : 'Approve refund'}</button>
-            <button type="button" className={`${styles.button} ${styles.danger}`} disabled={busy !== ''} onClick={() => decide(false)}>{busy === 'decline' ? 'Saving…' : 'Decline (final)'}</button>
+            <button type="button" className={`${styles.button} ${styles.danger}`} disabled={busy !== ''} onClick={() => decide(false)}>{busy === 'decline' ? 'Saving…' : 'Decline'}</button>
           </div>
         </div>
       )}
@@ -122,6 +145,12 @@ function RefundRow({ row, onDone }: { row: DevRefund; onDone: (message: string) 
       {row.status === 'approved' && row.refund_method && row.refund_method !== 'manual' && (
         <button type="button" className={styles.button} disabled={busy !== ''} onClick={() => void run('send', async () => { await retryRefund(row.id); return `Refunded ${usd(row.amount)} through Stripe.`; })}>
           {busy === 'send' ? 'Sending…' : 'Send the refund through Stripe'}
+        </button>
+      )}
+
+      {row.status === 'approved' && !row.gateway_refund_id && !row.automatic && (
+        <button type="button" className={`${styles.button} ${styles.danger}`} disabled={busy !== ''} onClick={undo}>
+          {busy === 'undo' ? 'Cancelling…' : 'Cancel this refund'}
         </button>
       )}
 

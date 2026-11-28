@@ -17,13 +17,16 @@ import {
 import { publicLicenseKey, readSecret, storedSecretNames } from './server/secrets.mjs';
 import { gatewayChecks, nowPaymentsPaidOrder, stripePaidOrder, stripeRefunds, verifyNowPaymentsSignature, verifyStripeSignature } from './server/payments.mjs';
 import {
-  buyerRefunds, cancelRefund, decideRefund, issueRefund, markRefunded, ownerRefunds, recordStripeRefunds, requestRefund, retryRefund,
+  buyerRefunds, cancelRefund, decideRefund, issueRefund, markRefunded, ownerRefunds, recordStripeRefunds, requestRefund, retryRefund, undoRefund,
 } from './server/refunds.mjs';
 import {
   applyGatewayWebhook, checkProductReleases, claimFree, completePaid, confirmReturn, deleteProduct, downloadForBuyer, downloadForKey, importFromRelease, paymentStatus, readPaymentsConfig,
   packageForSite, releaseDomain, saveProduct, savePayments, setVersionStatus, startCheckout, uploadVersion, verifyKey, verifyStoredPackage, MAX_PACKAGE_BYTES,
 } from './server/store.mjs';
-import { cleanRef, inboxDecide, inboxList, inboxReply, inboxThread, pushRevocations, reportPendingPurchases, signedRevocationList } from './server/platformSync.mjs';
+import {
+  buyerContact, cleanRef, emailBuyer, inboxAskSeller, inboxDecide, inboxList, inboxOpen, inboxReply, inboxSellers, inboxThread, pushRevocations,
+  reportPendingDeclines, reportPendingPurchases, signedRevocationList,
+} from './server/platformSync.mjs';
 import { verifySnippet } from './server/license.mjs';
 import { refuseManaged, syncMarketplaceMirror } from './server/marketplaceMirror.mjs';
 import { autoSendListing, autoSendPending, listingOverview, sendToMarketplace, serviceLinkIo, stopListing } from './server/listing.mjs';
@@ -286,10 +289,10 @@ const developersServer = {
     'GET admin/status': async (ctx) => {
       await requireOwner(ctx);
       await refreshReleases(ctx, 8000, { allListings: true });
-      // Catch up with react-wp.com: sales still to report to buyers' accounts, revoked keys it was not told about yet.
+      // Catch up with react-wp.com: sales still to report to buyers' accounts, revoked keys and declined refunds it was not told about yet.
       if (ctx.supabase.secretKey) {
         await Promise.race([
-          Promise.all([reportPendingPurchases(ctx).catch(() => 0), pushRevocations(ctx).catch(() => null)]),
+          Promise.all([reportPendingPurchases(ctx).catch(() => 0), pushRevocations(ctx).catch(() => null), reportPendingDeclines(ctx).catch(() => 0)]),
           new Promise((resolve) => { setTimeout(resolve, 6000).unref?.(); }),
         ]);
       }
@@ -325,10 +328,40 @@ const developersServer = {
       return { status: 200, body: await markRefunded(ctx, await signedIn(ctx), ctx.json() || {}) };
     },
 
+    // Takes back an approval that was not sent yet (a buyer's request waits for an answer again; the owner's own refund is cancelled).
+    'POST admin/refunds/undo': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await undoRefund(ctx, await signedIn(ctx), ctx.json() || {}) };
+    },
+
+    // The buyer of one order (name, email, whether react-wp.com can reach them), read on demand; and an email to them.
+    'POST admin/orders/contact': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await buyerContact(ctx, ctx.json()?.order_id) };
+    },
+    'POST admin/orders/email': async (ctx) => {
+      await requireOwner(ctx);
+      const owner = await signedIn(ctx);
+      return { status: 200, body: await emailBuyer(ctx, ctx.json() || {}, { replyTo: owner?.email || '' }) };
+    },
+
     // Messages from react-wp.com about this shop's plugins: pre-sale questions, support and refund requests (server/platformSync.mjs).
+    // `?scope=buyer`: this account's conversations with sellers of plugins it bought.
     'GET admin/inbox': async (ctx) => {
       await requireOwner(ctx);
-      return { status: 200, body: await inboxList(ctx) };
+      return { status: 200, body: await inboxList(ctx, undefined, ctx.query?.scope === 'buyer' ? 'buyer' : 'seller') };
+    },
+    'POST admin/inbox/open': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await inboxOpen(ctx, ctx.json() || {}) };
+    },
+    'GET admin/inbox/sellers': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await inboxSellers(ctx) };
+    },
+    'POST admin/inbox/ask-seller': async (ctx) => {
+      await requireOwner(ctx);
+      return { status: 200, body: await inboxAskSeller(ctx, ctx.json() || {}) };
     },
     'POST admin/inbox/thread': async (ctx) => {
       await requireOwner(ctx);

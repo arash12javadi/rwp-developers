@@ -95,6 +95,52 @@ export async function reportPendingPurchases(ctx, { io, fetchImpl, max = 5 } = {
   return reported;
 }
 
+// ---------------------------------------------------------------------------------------------------- declined refunds
+
+/**
+ * Tells react-wp.com that this shop declined a buyer's refund request (`developer/refund-declined`), so the buyer can ask the
+ * marketplace owner to rule there. Only for a product listed on react-wp.com. Never throws: the decline stands here whatever
+ * happens. A refusal about this refund (4xx other than 401/429) is final; anything else is retried from the admin status.
+ */
+export async function reportStoreDecline(ctx, refundId, { io = serviceLinkIo(ctx), fetchImpl } = {}) {
+  const stamp = (patch) => update(ctx, 'dev_refunds', `id=eq.${enc(refundId)}`, patch, 'service').catch(() => {});
+  try {
+    if (!UUID.test(String(refundId || ''))) return { reported: false, reason: 'no_refund' };
+    const [refund] = await select(ctx, `dev_refunds?id=eq.${enc(refundId)}&select=id,order_id,amount,currency,reason,owner_note,status,origin,created_at,decided_at,platform_reported_at`, 'service');
+    if (!refund || refund.status !== 'declined' || refund.origin !== 'buyer' || refund.platform_reported_at) return { reported: false, reason: 'nothing_to_report' };
+    const [order] = await select(ctx, `dev_orders?id=eq.${enc(refund.order_id)}&select=id,product_id`, 'service');
+    const [license] = order ? await select(ctx, `dev_licenses?order_id=eq.${enc(order.id)}&select=license_key`, 'service') : [];
+    const [listing] = order ? await select(ctx, `dev_listings?product_id=eq.${enc(order.product_id)}&select=plugin_id`, 'service').catch(() => []) : [];
+    if (!license?.license_key || !listing?.plugin_id) {
+      await stamp({ platform_reported_at: new Date().toISOString(), platform_error: 'Not listed on react-wp.com, so there is nobody to appeal to.' });
+      return { reported: false, reason: 'not_listed' };
+    }
+    const answer = await platformRequest({
+      io, path: 'developer/refund-declined', method: 'POST', timeoutMs: 15_000, ...(fetchImpl ? { fetchImpl } : {}),
+      body: {
+        license_key: license.license_key, refund_id: refund.id, amount: Number(refund.amount) || 0, currency: refund.currency,
+        buyer_reason: refund.reason, decision_note: refund.owner_note, requested_at: refund.created_at, decided_at: refund.decided_at,
+      },
+    });
+    await stamp({ platform_reported_at: new Date().toISOString(), platform_error: '' });
+    return { reported: true, ticket_id: answer.body?.ticket_id || null };
+  } catch (error) {
+    const final = error instanceof LicenseLinkError && error.status >= 400 && error.status < 500 && error.status !== 401 && error.status !== 429;
+    await stamp({ platform_error: errorText(error), ...(final ? { platform_reported_at: new Date().toISOString() } : {}) });
+    return { reported: false, reason: errorText(error) };
+  }
+}
+
+/** Declines still to report (a few per call), from the admin status. */
+export async function reportPendingDeclines(ctx, { io, fetchImpl, max = 5 } = {}) {
+  const rows = await select(ctx, `dev_refunds?status=eq.declined&origin=eq.buyer&platform_reported_at=is.null&select=id&order=decided_at.asc&limit=${max}`, 'service').catch(() => []);
+  let reported = 0;
+  for (const row of rows) {
+    if ((await reportStoreDecline(ctx, row.id, { ...(io ? { io } : {}), fetchImpl })).reported) reported += 1;
+  }
+  return reported;
+}
+
 // ---------------------------------------------------------------------------------------------------- revocations
 
 let listCache = { at: 0, body: null };
@@ -202,7 +248,86 @@ const inboxCall = async (ctx, path, method, body, { io = serviceLinkIo(ctx), fet
   }
 };
 
-export const inboxList = (ctx, options) => inboxCall(ctx, 'developer/tickets', 'GET', undefined, options);
+/** `scope`: `seller` (buyers of this shop's plugins, the default) or `buyer` (sellers of plugins this account bought). */
+export const inboxList = (ctx, options, scope = 'seller') =>
+  inboxCall(ctx, `developer/tickets${scope === 'buyer' ? '?scope=buyer' : ''}`, 'GET', undefined, options);
+
+/** The local order a message is about, with its licence key; throws a sentence when there is none. */
+async function orderWithKey(ctx, orderId) {
+  if (!UUID.test(String(orderId || ''))) throw new HttpError(400, 'Choose the sale first.');
+  const [order] = await select(ctx, `dev_orders?id=eq.${enc(orderId)}&select=id,buyer_id,product_id,status,platform_ref,platform_reported_at`, 'service');
+  if (!order) throw new HttpError(404, 'That order does not exist.');
+  const [license] = await select(ctx, `dev_licenses?order_id=eq.${enc(order.id)}&select=license_key,serial`, 'service').catch(() => []);
+  return { order, license: license || null };
+}
+
+/**
+ * Starts a conversation on react-wp.com with the buyer of one of this shop's orders (`developer/ticket-open`). It works when the
+ * purchase is on the buyer's react-wp.com account (reported from a Buy there, or claimed by the buyer); otherwise react-wp.com
+ * says so and the owner can email the buyer instead.
+ */
+export async function inboxOpen(ctx, body, options) {
+  const { license } = await orderWithKey(ctx, body?.order_id);
+  if (!license?.license_key) throw new HttpError(409, 'This order has no licence key yet (it is not paid), so it cannot be found on react-wp.com.');
+  return inboxCall(ctx, 'developer/ticket-open', 'POST', { license_key: license.license_key, subject: text(body?.subject, 200), message: text(body?.message, 4000) }, options);
+}
+
+/** Plugins this account bought from other developers (or on react-wp.com), whose sellers it can write to. */
+export const inboxSellers = (ctx, options) => inboxCall(ctx, 'developer/sellers', 'GET', undefined, options);
+
+/** This account, as a buyer, writes to the seller of a plugin it owns. */
+export const inboxAskSeller = (ctx, body, options) => inboxCall(ctx, 'developer/ask-seller', 'POST', {
+  plugin_id: String(body?.plugin_id || ''), subject: text(body?.subject, 200), message: text(body?.message, 4000),
+}, options);
+
+/**
+ * The buyer of one order, for the shop's owner: display name, email address, and whether the purchase can be reached on
+ * react-wp.com (`on_platform`). Owner only (the route checks); the address is read on demand, never listed in bulk.
+ */
+export async function buyerContact(ctx, orderId) {
+  const { order, license } = await orderWithKey(ctx, orderId);
+  const [profile] = await select(ctx, `profiles?id=eq.${enc(order.buyer_id)}&select=display_name`, 'service').catch(() => []);
+  return {
+    order_id: order.id,
+    name: String(profile?.display_name || '').trim(),
+    email: await buyerEmail(ctx, order.buyer_id),
+    on_platform: Boolean(order.platform_reported_at),
+    has_key: Boolean(license?.license_key),
+  };
+}
+
+export const BUYER_EMAILS_PER_HOUR = 30;
+let emailWindow = { start: 0, count: 0 };
+
+/**
+ * Emails the buyer of one order through core `sendPluginMail` (Settings → Integrations → Email, or this plugin's own sender).
+ * `{ order_id, subject, message }`. A per-instance budget keeps a stolen admin session from turning the site into a mailer.
+ */
+export async function emailBuyer(ctx, body, { replyTo = '', deps = {}, now = Date.now() } = {}) {
+  const subject = text(body?.subject, 200);
+  const message = text(body?.message, 4000);
+  if (subject.length < 3) throw new HttpError(400, 'Give the email a short subject.');
+  if (message.length < 10) throw new HttpError(400, 'Write at least 10 characters.');
+  if (now - emailWindow.start > 60 * 60 * 1000) emailWindow = { start: now, count: 0 };
+  if (emailWindow.count >= BUYER_EMAILS_PER_HOUR) throw new HttpError(429, `You can email ${BUYER_EMAILS_PER_HOUR} buyers an hour from here. Try again later.`);
+  const { order } = await orderWithKey(ctx, body?.order_id);
+  const to = await buyerEmail(ctx, order.buyer_id);
+  if (!to) throw new HttpError(404, 'This buyer has no email address on this site.');
+  const [product] = await select(ctx, `dev_products?id=eq.${enc(order.product_id)}&select=title`, 'service').catch(() => []);
+  const lines = [message, `This message is about your purchase of ${String(product?.title || 'a plugin')}. Reply to this email to answer.`];
+  const send = deps.send || ((mail) => sendPluginMail('rwp-developers', DEVELOPERS_EMAIL_CONFIG_KEY, ctx, mail));
+  emailWindow.count += 1;
+  const result = await send({
+    to: [to],
+    subject,
+    // Replies go to the shop owner who wrote it, not to the site's sending address.
+    ...(String(replyTo).includes('@') ? { replyTo: String(replyTo) } : {}),
+    text: lines.join('\n\n'),
+    html: lines.map((line) => `<p style="white-space:pre-wrap">${escape(line)}</p>`).join(''),
+  });
+  if (!result?.sent) throw new HttpError(503, result?.reason || 'The email was not sent. Check Settings → Integrations → Email.');
+  return { sent: true };
+}
 
 /** One conversation, with the local order and licence a refund is about when they can be found here. */
 export async function inboxThread(ctx, ticketId, options) {

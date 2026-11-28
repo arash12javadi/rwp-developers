@@ -237,16 +237,20 @@ function RefundCell({ license, requests, onDone }: { license: MyLicense; request
   const open = requests.find((row) => ['requested', 'approved', 'processing'].includes(row.status));
   const declined = requests.some((row) => row.status === 'declined');
   const left = Math.round((Number(license.amount || 0) - Number(license.refunded_amount || 0)) * 100) / 100;
-  const canAsk = license.order_status === 'paid' && left > 0 && !open && !declined;
+  // Within 28 days of the payment the refund is automatic (no reason, no decision; an earlier "no" does not count).
+  const owed = Boolean(license.paid_at) && Date.now() - Date.parse(String(license.paid_at)) <= 28 * 24 * 60 * 60 * 1000;
+  const canAsk = license.order_status === 'paid' && left > 0 && !open && (!declined || owed);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError('');
     try {
-      await askForRefund(license.order_id, reason.trim(), amount.trim() ? Number(amount) : null);
+      const result = await askForRefund(license.order_id, reason.trim(), amount.trim() ? Number(amount) : null);
       setAsking(false);
-      await onDone('Your refund request was sent to the shop. The answer appears here.');
+      await onDone(result.automatic
+        ? (result.sent ? 'Refunded automatically (within 28 days of your payment). It shows on your statement within a few days.' : 'Your refund was approved automatically (within 28 days of your payment). The shop sends it back by hand, which can take a few days.')
+        : 'Your refund request was sent to the shop. The answer appears here.');
     } catch (submitError) {
       setError(errorText(submitError, 'Could not send the request.'));
     } finally {
@@ -279,17 +283,26 @@ function RefundCell({ license, requests, onDone }: { license: MyLicense; request
           {latest.status === 'approved' && license.provider === 'nowpayments' ? '. USDT is sent back by hand, so it can take a few days.' : ''}
         </p>
       )}
+      {latest?.status === 'declined' && latest.appealable && (
+        <p className={styles.hint}>
+          Not happy with this answer? This plugin is sold through the react-wp.com marketplace, whose owner can review the decision and
+          rule on it. <a href="https://www.react-wp.com/dashboard?tab=messages" target="_blank" rel="noreferrer noopener">Sign in at react-wp.com</a>:
+          the declined request is under <strong>Messages</strong>, with <strong>Escalate to marketplace owner</strong>. If you do not see it, first add
+          this purchase under <strong>My purchases → Claim licence key</strong> with the key above.
+        </p>
+      )}
       {open?.status === 'requested' && (
         <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy} onClick={() => void withdraw()}>Withdraw</button>
       )}
       {canAsk && (asking ? (
         <form onSubmit={submit}>
-          <label className={styles.hint} htmlFor={`why-${license.id}`}>Why do you want a refund? The shop reads this.</label>
+          {owed && <p className={styles.hint}>Within 28 days of your payment: you get your money back without discussion.</p>}
+          <label className={styles.hint} htmlFor={`why-${license.id}`}>{owed ? 'Why (optional; the shop reads it)' : 'Why do you want a refund? The shop reads this.'}</label>
           <textarea id={`why-${license.id}`} className={styles.textarea} rows={3} maxLength={2000} value={reason} disabled={busy} onChange={(event) => setReason(event.target.value)} />
           <label className={styles.hint} htmlFor={`amt-${license.id}`}>Amount (empty = all ${left.toFixed(2)})</label>
           <input id={`amt-${license.id}`} className={styles.input} type="number" min="0.01" max={left} step="0.01" value={amount} disabled={busy} onChange={(event) => setAmount(event.target.value)} />
           <p className={styles.hint}>A full refund ends this licence: the key stops working.</p>
-          <button type="submit" className={styles.button} disabled={busy || reason.trim().length < 10}>{busy ? 'Sending…' : 'Send'}</button>{' '}
+          <button type="submit" className={styles.button} disabled={busy || (!owed && reason.trim().length < 10)}>{busy ? 'Sending…' : owed ? 'Refund me' : 'Send'}</button>{' '}
           <button type="button" className={`${styles.button} ${styles.ghost}`} disabled={busy} onClick={() => setAsking(false)}>Cancel</button>
         </form>
       ) : (
