@@ -279,7 +279,7 @@ const inboxCall = async (ctx, path, method, body, { io = serviceLinkIo(ctx), fet
 
 /** `scope`: `seller` (buyers of this shop's plugins, the default) or `buyer` (sellers of plugins this account bought). */
 export const inboxList = (ctx, options, scope = 'seller') =>
-  inboxCall(ctx, `developer/tickets${scope === 'buyer' ? '?scope=buyer' : ''}`, 'GET', undefined, options);
+  inboxCall(ctx, scope === 'buyer' ? 'developer/buyer-tickets' : 'developer/tickets', 'GET', undefined, options);
 
 /** The local order a message is about, with its licence key; throws a sentence when there is none. */
 async function orderWithKey(ctx, orderId) {
